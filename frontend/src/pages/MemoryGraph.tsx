@@ -29,22 +29,28 @@ const ROLE_COLORS: Record<string, string> = {
 function FlowNode({ node, selected, onOpen }: { node: ApiNode; selected: boolean; onOpen: (n: ApiNode) => void }) {
   const key = node.status ? `${node.type}_${node.status}` : node.type;
   const color = ROLE_COLORS[key] ?? ROLE_COLORS[node.type] ?? '#2e374a';
+  // Glow ring for nodes that are on the incident attack path or are the suspect.
+  const ringStyle: React.CSSProperties = node.incidentSuspect
+    ? { boxShadow: '0 0 0 2px #f6667a, 0 0 10px 2px rgba(246,102,122,0.45)' }
+    : node.onIncidentPath
+      ? { boxShadow: '0 0 0 2px #f5b950, 0 0 8px 1px rgba(245,185,80,0.35)' }
+      : {};
   return (
     <div
       className={`flow-node ${node.type} ${node.status ?? ''} ${selected ? 'selected' : ''}`}
       onClick={() => onOpen(node)}
-      style={{ borderLeft: `3px solid ${color}` }}
+      style={{ borderLeft: `3px solid ${color}`, ...ringStyle }}
     >
       {/* Invisible connection anchors; edges draw node-to-node */}
       <Handle type="target" position={Position.Top} style={{ visibility: 'hidden' }} isConnectable={false} />
-      <div className="ntype">{node.type}</div>
+      <div className="ntype">{node.type}{node.incidentSuspect ? ' ⚠' : node.onIncidentPath ? ' ·' : ''}</div>
       <div className="nlabel">{node.label}</div>
       <Handle type="source" position={Position.Bottom} style={{ visibility: 'hidden' }} isConnectable={false} />
     </div>
   );
 }
 
-export default function MemoryGraph({ onNav, dataVersion }: { onNav: (p: string, id?: string) => void; dataVersion: number }) {
+export default function MemoryGraph({ onNav, dataVersion, incidentId }: { onNav: (p: string, id?: string) => void; dataVersion: number; incidentId?: string }) {
   const [nodes, setNodes] = useState<ApiNode[] | null>(null);
   const [edges, setEdges] = useState<ApiEdge[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -64,7 +70,7 @@ export default function MemoryGraph({ onNav, dataVersion }: { onNav: (p: string,
     let alive = true;
     setNodes(null);
     api
-      .graph({ type, status, agentId })
+      .graph({ type, status, agentId, incident: incidentId })
       .then((v) => {
         if (!alive) return;
         setNodes(v.nodes);
@@ -75,7 +81,7 @@ export default function MemoryGraph({ onNav, dataVersion }: { onNav: (p: string,
     return () => {
       alive = false;
     };
-  }, [type, status, agentId, dataVersion]);
+  }, [type, status, agentId, dataVersion, incidentId]);
 
   const flowNodes = useMemo<Node[]>(
     () =>
@@ -158,6 +164,16 @@ export default function MemoryGraph({ onNav, dataVersion }: { onNav: (p: string,
             ))}
           </select>
         </label>
+        {incidentId && (
+          <span className="badge" style={{ background: 'var(--red)', color: '#fff', alignSelf: 'flex-end', marginBottom: 2 }}>
+            ⚠ Filtered to incident: {incidentId}
+            <button
+              onClick={() => onNav('graph')}
+              style={{ marginLeft: 8, background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 0, fontFamily: 'inherit' }}
+              title="Clear incident filter"
+            >×</button>
+          </span>
+        )}
       </div>
 
       {!nodes && <Loading label="Loading graph…" />}
@@ -188,11 +204,11 @@ export default function MemoryGraph({ onNav, dataVersion }: { onNav: (p: string,
             {selected ? (
               <>
                 <h3>Node details</h3>
-                <div className="kv" style={{ gridTemplateColumns: '90px 1fr' }}>
+                <div className="kv" style={{ gridTemplateColumns: '110px 1fr' }}>
                   <dt>Type</dt>
                   <dd>{selected.type}</dd>
                   <dt>ID</dt>
-                  <dd>{selected.id}</dd>
+                  <dd style={{ fontFamily: 'var(--mono)', fontSize: 12, wordBreak: 'break-all' }}>{selected.id}</dd>
                   {selected.status && (
                     <>
                       <dt>Status</dt>
@@ -201,19 +217,54 @@ export default function MemoryGraph({ onNav, dataVersion }: { onNav: (p: string,
                       </dd>
                     </>
                   )}
-                  {selected.agentId && (
+                  {typeof selected.meta?.role === 'string' && selected.meta.role && (
                     <>
-                      <dt>Agent scope</dt>
-                      <dd>{selected.agentId}</dd>
+                      <dt>Role</dt>
+                      <dd>{selected.meta.role}</dd>
+                    </>
+                  )}
+                  {typeof selected.meta?.sourceType === 'string' && selected.meta.sourceType && (
+                    <>
+                      <dt>Source type</dt>
+                      <dd>{selected.meta.sourceType}</dd>
+                    </>
+                  )}
+                  {typeof selected.meta?.severity === 'string' && selected.meta.severity && (
+                    <>
+                      <dt>Severity</dt>
+                      <dd>{selected.meta.severity}</dd>
+                    </>
+                  )}
+                  {selected.incidentSuspect && (
+                    <>
+                      <dt>Incident</dt>
+                      <dd><span className="badge" style={{ background: 'var(--red)', color: '#fff' }}>⚠ Suspect node</span></dd>
+                    </>
+                  )}
+                  {!selected.incidentSuspect && selected.onIncidentPath && (
+                    <>
+                      <dt>Incident</dt>
+                      <dd><span className="badge" style={{ background: '#916c00', color: '#fff' }}>On attack path</span></dd>
+                    </>
+                  )}
+                  {selected.flagged && (
+                    <>
+                      <dt>Flagged</dt>
+                      <dd><span className="badge" style={{ background: '#5b3fbd', color: '#fff' }}>Flagged by incident</span></dd>
                     </>
                   )}
                 </div>
-                {typeof selected.props?.content === 'string' && (
-                  <p style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{selected.props.content}</p>
+                {typeof selected.meta?.content === 'string' && (
+                  <p style={{ fontFamily: 'var(--mono)', fontSize: 11, marginTop: 8, background: '#0b0e14', padding: 8, borderRadius: 4, wordBreak: 'break-word' }}>{selected.meta.content}</p>
                 )}
                 {(selected.type === 'Memory' || selected.id.startsWith('mem-')) && (
                   <button className="btn small" onClick={() => onNav('memories', selected.id)} style={{ marginTop: 8 }}>
                     Open memory detail →
+                  </button>
+                )}
+                {(selected.type === 'Incident' || selected.id.startsWith('inc-')) && (
+                  <button className="btn small" onClick={() => onNav('incidents', selected.id)} style={{ marginTop: 8 }}>
+                    Open incident detail →
                   </button>
                 )}
               </>

@@ -100,7 +100,7 @@ export default function App() {
       );
       break;
     case 'graph':
-      page = <MemoryGraph onNav={nav} dataVersion={dataVersion} />;
+      page = <MemoryGraph onNav={nav} dataVersion={dataVersion} incidentId={route.param ?? undefined} />;
       break;
     case 'memories':
       page = route.param ? (

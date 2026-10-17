@@ -188,17 +188,23 @@ export async function revalidateQuarantinedRoot(
   return { ok: true, memoryId };
 }
 
-/** Decision revalidation: allowed only when no DEPENDS_ON memory is quarantined/review_required. */
+/** Decision revalidation: allowed only when no DEPENDS_ON memory (or any transitive DERIVED_FROM ancestor) is quarantined/review_required. */
 export async function revalidateDecision(
   decisionId: string,
   reason: string,
   actor = 'operator',
 ): Promise<{ ok: true; decisionId: string } | { ok: false; blockedBy: string[] }> {
+  // Expand: follow DEPENDS_ON to every direct memory dependency, then follow
+  // DERIVED_FROM ancestry up to maxDepth hops from each dependency.
+  // Block if any memory in that full set has a non-safe status.
   const rows = await roQuery<{ status: string; blocked: (string | null)[] }>(
     `MATCH (d:Decision {id:$did})
      OPTIONAL MATCH (d)-[:DEPENDS_ON]->(m:Memory)
+     OPTIONAL MATCH (m)-[:DERIVED_FROM*0..${TRAVERSAL.maxDepth}]->(ancestor:Memory)
+     WITH d,
+          collect(DISTINCT CASE WHEN ancestor.status IN ['quarantined','review_required'] THEN ancestor.id END) AS blocked
      RETURN d.status AS status,
-            collect(CASE WHEN m.status IN ['quarantined','review_required'] THEN m.id END) AS blocked`,
+            [x IN blocked WHERE x IS NOT NULL] AS blocked`,
     { did: decisionId },
   );
   if (!rows.length) throw new NotFoundError(`decision ${decisionId} not found`);

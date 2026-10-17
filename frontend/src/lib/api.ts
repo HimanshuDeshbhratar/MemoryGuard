@@ -97,8 +97,14 @@ export interface GraphNode {
   type: 'Agent' | 'Memory' | 'Source' | 'Decision' | 'Incident';
   label: string;
   status: string | null;
-  agentId: string | null;
-  props: Record<string, unknown>;
+  /** Structured node metadata from the backend (content, severity, role, sourceType, etc.) */
+  meta: Record<string, unknown>;
+  /** True if this node is the suspect memory targeted by the active incident filter */
+  incidentSuspect: boolean;
+  /** True if this node is on the downstream attack path of the active incident */
+  onIncidentPath: boolean;
+  /** True if this node has been flagged via FLAGGED_BY relationship */
+  flagged: boolean;
 }
 
 export interface GraphEdge {
@@ -220,12 +226,12 @@ export const api = {
     }),
   explanation: (id: string) => request<Explanation>(`/api/incidents/${encodeURIComponent(id)}/explanation`, { method: 'POST' }),
   revalidateMemory: (id: string, reason: string, opts?: { root?: boolean }) =>
-    request<{ ok: boolean; [k: string]: unknown }>(`/api/memories/${encodeURIComponent(id)}/revalidate${opts?.root ? '?root=true' : ''}`, {
+    request<{ ok: boolean;[k: string]: unknown }>(`/api/memories/${encodeURIComponent(id)}/revalidate${opts?.root ? '?root=true' : ''}`, {
       method: 'POST',
       body: JSON.stringify({ reason, actor: 'operator' }),
     }),
   revalidateDecision: (id: string, reason: string) =>
-    request<{ ok: boolean; [k: string]: unknown }>(`/api/decisions/${encodeURIComponent(id)}/revalidate`, {
+    request<{ ok: boolean;[k: string]: unknown }>(`/api/decisions/${encodeURIComponent(id)}/revalidate`, {
       method: 'POST',
       body: JSON.stringify({ reason, actor: 'operator' }),
     }),

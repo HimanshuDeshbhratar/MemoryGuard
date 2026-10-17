@@ -19,40 +19,39 @@ export interface BlastRadius {
   truncated: boolean;
 }
 
-const DOWNSTREAM_CYPHER = `
-MATCH (root:Memory {id: $memoryId})
-MATCH path = (root)<-[:DERIVED_FROM*1..${TRAVERSAL.maxDepth}]-(m:Memory)
-WHERE m.id <> root.id
-WITH m, min(length(path)) AS depth
-ORDER BY depth ASC
-LIMIT $maxNodes
-RETURN m.id AS memoryId, m.content AS content, m.status AS status, depth
+/**
+ * Finds decisions affected by the suspect memory.
+ * A decision is affected if it DEPENDS_ON:
+ *   - the suspect root directly, OR
+ *   - any memory that is derived (via DERIVED_FROM*) FROM the suspect root.
+ *
+ * Direction note: DERIVED_FROM edges point FROM child TO parent.
+ *   child -[:DERIVED_FROM]-> parent
+ * So "derived from root" means: (derived)<-[:DERIVED_FROM*]-(root)?
+ * No — DERIVED_FROM is child→parent. "Downstream" means the child IS derived from root,
+ * i.e., child-[:DERIVED_FROM*]->root. The child is what we want to catch.
+ *
+ * Correct Cypher: find (d:Decision)-[:DEPENDS_ON]->(m:Memory) where m is either
+ *   - the suspect root itself, or
+ *   - a memory that transitively derives from the root (m)-[:DERIVED_FROM*1..N]->(root)
+ */
+const AFFECTED_DECISIONS_CYPHER = `
+MATCH (root:Memory {id: $mid})
+MATCH (d:Decision)-[:DEPENDS_ON]->(m:Memory)
+WHERE m.id = root.id
+   OR (m)-[:DERIVED_FROM*1..${TRAVERSAL.maxDepth}]->(root)
+RETURN DISTINCT d.id AS decisionId
 `;
 
-const DOWNSTREAM_COUNT_CYPHER = `
-MATCH (root:Memory {id: $memoryId})
-MATCH path = (root)<-[:DERIVED_FROM*1..${TRAVERSAL.maxDepth}]-(m:Memory)
-WHERE m.id <> root.id
-RETURN count(DISTINCT m) AS downstreamCount
-`;
-
+/**
+ * Chain query: returns complete memory+decision chains starting from root.
+ * Each row: chain = [rootId, ...intermediateMemoryIds, consumerDecisionId]
+ * decisionId is the consuming Decision node at the end of the chain.
+ */
 const CHAIN_CYPHER = `
 MATCH (root:Memory {id: $mid})
 MATCH path = (root)<-[:DERIVED_FROM*0..${TRAVERSAL.maxDepth}]-(m:Memory)<-[:DEPENDS_ON]-(d:Decision)
-RETURN d.id AS decisionId, [x IN nodes(path) | x.id] AS chain
-LIMIT $maxNodes
-`;
-
-const DIRECT_CHAIN_CYPHER_DECISIONS = `
-MATCH (d:Decision)-[dep:DEPENDS_ON]->(m:Memory)
-WHERE m.id = $mid
-  OR (m)-[:DERIVED_FROM*1..${TRAVERSAL.maxDepth}]->(:Memory {id: $mid})
-RETURN DISTINCT d.id AS decisionId, dep.evidence AS evidence
-`;
-
-const ROOT_CHAIN_CYPHER = `
-MATCH path = (m:Memory {id: $memoryId})<-[:DERIVED_FROM*0..${TRAVERSAL.maxDepth}]-(x)
-RETURN [x IN nodes(path) | x.id] AS chain
+RETURN d.id AS decisionId, [x IN nodes(path) | x.id] + [d.id] AS chain
 LIMIT $maxNodes
 `;
 
@@ -80,6 +79,7 @@ export async function computeBlastRadius(incidentId?: string, memoryId?: string)
 
   if (!suspectMemoryId) return result;
 
+  // 1. Find downstream derived memories (children derive FROM the root).
   const memoryRows = await roQuery<{
     memoryId: string;
     content: string;
@@ -110,7 +110,8 @@ export async function computeBlastRadius(incidentId?: string, memoryId?: string)
   }
   result.truncated = truncated;
 
-  const decisionRows = await roQuery<{ decisionId: string; evidence: string }>(DIRECT_CHAIN_CYPHER_DECISIONS, {
+  // 2. Find affected decisions via the corrected traversal direction.
+  const decisionRows = await roQuery<{ decisionId: string }>(AFFECTED_DECISIONS_CYPHER, {
     mid: suspectMemoryId,
   });
   const dedupDecisions = new Set<string>();
@@ -121,18 +122,19 @@ export async function computeBlastRadius(incidentId?: string, memoryId?: string)
     }
   }
 
-    const chainRows = await roQuery<{ chain: string[] }>(CHAIN_CYPHER, { mid: suspectMemoryId, maxNodes: TRAVERSAL.maxNodes });
+  // 3. Collect full chains with the real decisionId populated.
+  const chainRows = await roQuery<{ chain: string[]; decisionId: string }>(CHAIN_CYPHER, {
+    mid: suspectMemoryId,
+    maxNodes: TRAVERSAL.maxNodes,
+  });
   const chainSet = new Set<string>();
-  for (const row of chainRows as { chain: string[] }[]) {
+  for (const row of chainRows) {
     const key = row.chain.join('>');
     if (!chainSet.has(key)) {
       chainSet.add(key);
-      result.chains.push({ chain: row.chain, decisionId: null });
+      result.chains.push({ chain: row.chain, decisionId: row.decisionId ?? null });
     }
   }
 
-  void DOWNSTREAM_CYPHER;
-  void DOWNSTREAM_COUNT_CYPHER;
-  void ROOT_CHAIN_CYPHER;
   return result;
 }

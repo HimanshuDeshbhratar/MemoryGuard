@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Play, Lock, Sparkles } from 'lucide-react';
+import { Play, Lock, Sparkles, GitBranch } from 'lucide-react';
 import {
   api,
   timeAgo,
@@ -110,6 +110,10 @@ export default function IncidentDetail({
           <Play size={14} />
           {investigating ? 'Traversing graph…' : 'Run investigation'}
         </button>
+        <button className="btn" onClick={() => onNav('graph', id)} title="Open the memory graph filtered to this incident's attack path">
+          <GitBranch size={14} />
+          View attack path
+        </button>
         {incident.status !== 'contained' && (
           <button className="btn danger" onClick={runQuarantine} disabled={quarantining}>
             <Lock size={14} />
@@ -205,9 +209,7 @@ export default function IncidentDetail({
                     <div className="faint" style={{ marginBottom: 6 }}>Affected decisions:</div>
                     {investigation.affectedDecisionIds.map((d) => (
                       <div key={d}>
-                        <button className="clickable mono" onClick={() => onNav('memories')}>
-                          {d}
-                        </button>
+                        <span className="mono" style={{ fontSize: 12, color: 'var(--muted)' }}>{d}</span>
                       </div>
                     ))}
                   </div>

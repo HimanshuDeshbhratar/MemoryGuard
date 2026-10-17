@@ -227,3 +227,128 @@ describe('API routes + validation', () => {
     expect(res.body.remediation.length).toBeGreaterThan(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Adversarial tests: multi-hop transitive dependency blocking
+// ---------------------------------------------------------------------------
+describe('transitive dependency blocking (revalidateDecision)', () => {
+  /**
+   * Setup for these tests:
+   *   mem-A (quarantined root) ← mem-B (derived) ← mem-C (derived)
+   *   dec-transitive -[:DEPENDS_ON]-> mem-C
+   *
+   * Even though dec-transitive only directly depends on mem-C, it must be
+   * blocked because mem-C derives (transitively) from quarantined mem-A.
+   *
+   * We reset to a clean demo state before each test in this suite.
+   */
+  beforeAll(async () => {
+    // Reset to fresh demo state so mem-suspicious-root is 'suspicious' again.
+    const db = await testDb();
+    await clearTestGraph();
+    await seed();
+
+    // Create a 3-hop chain: mem-suspicious-root ← mem-hop-b ← mem-hop-c
+    // and a decision dec-transitive depending on mem-hop-c.
+    await db.selectGraph(TEST_GRAPH).query(
+      `MERGE (b:Memory {id:'mem-hop-b'}) SET b.content='derived hop B', b.status='trusted', b.synthetic=true
+       MERGE (c:Memory {id:'mem-hop-c'}) SET c.content='derived hop C', c.status='trusted', c.synthetic=true
+       MERGE (b)-[:DERIVED_FROM]->(root:Memory {id:'mem-suspicious-root'})
+       MERGE (c)-[:DERIVED_FROM]->(b)
+       MERGE (dec:Decision {id:'dec-transitive'})
+         SET dec.description='Transitive dep decision', dec.status='review_required', dec.synthetic=true
+       MERGE (dec)-[:DEPENDS_ON]->(c)`,
+    );
+    // Quarantine the root so the transitive chain is live.
+    await quarantine('inc-auth-checks');
+  });
+
+  it('blocks revalidateDecision when only a transitive ancestor is quarantined', async () => {
+    // dec-transitive -> mem-hop-c -> mem-hop-b -> mem-suspicious-root (quarantined)
+    // The decision's direct dependency (mem-hop-c) is still trusted,
+    // but mem-suspicious-root is quarantined upstream.
+    const result = await revalidateDecision('dec-transitive', 'Trying to approve despite upstream quarantine');
+    expect(result.ok).toBe(false);
+    const blockedBy = (result as { blockedBy: string[] }).blockedBy;
+    // Must mention mem-suspicious-root (the quarantined ancestor).
+    expect(blockedBy).toContain('mem-suspicious-root');
+  });
+
+  it('includes mem-hop-b in blast radius downstream memories', async () => {
+    const blast = await computeBlastRadius('inc-auth-checks');
+    expect(blast.downstreamMemoryIds).toContain('mem-hop-b');
+    expect(blast.downstreamMemoryIds).toContain('mem-hop-c');
+  });
+
+  it('includes dec-transitive in blast radius affected decisions', async () => {
+    const blast = await computeBlastRadius('inc-auth-checks');
+    expect(blast.affectedDecisionIds).toContain('dec-transitive');
+  });
+
+  it('chains carry the real decisionId (not null)', async () => {
+    const blast = await computeBlastRadius('inc-auth-checks');
+    const chainsWithDecision = blast.chains.filter((c) => c.decisionId !== null);
+    expect(chainsWithDecision.length).toBeGreaterThan(0);
+    const ids = chainsWithDecision.map((c) => c.decisionId);
+    // dec-deploy or dec-transitive must appear.
+    expect(ids.some((d) => d === 'dec-deploy' || d === 'dec-transitive')).toBe(true);
+  });
+
+  it('downstream derived memories remain review_required after root revalidation (not auto-trusted)', async () => {
+    // Revalidate root.
+    await revalidateQuarantinedRoot(
+      'mem-suspicious-root',
+      'Verified inert for transitive test.',
+      'test-analyst',
+    );
+    const db = await testDb();
+    // mem-derived-plan was flagged review_required during quarantine; it must NOT be auto-trusted.
+    const res = await db
+      .selectGraph(TEST_GRAPH)
+      .roQuery('MATCH (m:Memory {id:"mem-derived-plan"}) RETURN m.status AS s');
+    const status = ((res.data as unknown as { s: string }[])[0] as { s: string }).s;
+    expect(status).toBe('review_required');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Adversarial tests: graph API incident path fields
+// ---------------------------------------------------------------------------
+describe('graph API incident fields', () => {
+  beforeAll(async () => {
+    await clearTestGraph();
+    await seed();
+  });
+
+  it('nodes on the incident path have incidentSuspect / onIncidentPath flags', async () => {
+    const res = await agent().get('/api/graph?incident=inc-auth-checks').expect(200);
+    const nodes: { id: string; incidentSuspect: boolean; onIncidentPath: boolean; meta: Record<string, unknown> }[] = res.body.nodes;
+
+    const suspect = nodes.find((n) => n.id === 'mem-suspicious-root');
+    expect(suspect).toBeDefined();
+    expect(suspect?.incidentSuspect).toBe(true);
+
+    const derived = nodes.find((n) => n.id === 'mem-derived-plan');
+    expect(derived).toBeDefined();
+    expect(derived?.onIncidentPath).toBe(true);
+  });
+
+  it('graph nodes include meta with content field', async () => {
+    const res = await agent().get('/api/graph').expect(200);
+    const memNode: { id: string; meta: { content?: string } } | undefined =
+      res.body.nodes.find((n: { id: string }) => n.id === 'mem-suspicious-root');
+    expect(memNode).toBeDefined();
+    // meta.content should be present (not undefined) for Memory nodes.
+    expect(typeof memNode?.meta?.content).toBe('string');
+  });
+
+  it('unrelated memories are not flagged as on the incident path', async () => {
+    const res = await agent().get('/api/graph?incident=inc-auth-checks').expect(200);
+    const unrelated: { id: string; onIncidentPath: boolean; incidentSuspect: boolean } | undefined =
+      res.body.nodes.find((n: { id: string }) => n.id === 'mem-unrelated-trusted');
+    if (unrelated) {
+      expect(unrelated.incidentSuspect).toBe(false);
+      expect(unrelated.onIncidentPath).toBe(false);
+    }
+  });
+});
