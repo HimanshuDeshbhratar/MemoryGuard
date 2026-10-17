@@ -362,6 +362,67 @@ describe('decision revalidation safety edges', () => {
   });
 });
 
+describe('revalidation audit event idempotency', () => {
+  beforeEach(async () => {
+    await clearTestGraph();
+    await seed();
+  });
+
+  it('records distinct review cycles with their own reasons, but creates no retry duplicates', async () => {
+    const first = {
+      root: 'First root review: synthetic source was independently verified.',
+      memory: 'First downstream review: plan was independently checked.',
+      decision: 'First decision review: dependencies were independently checked.',
+    };
+    const second = {
+      root: 'Second root review: a later incident required a fresh assessment.',
+      memory: 'Second downstream review: the later incident was independently assessed.',
+      decision: 'Second decision review: the later incident dependencies were assessed.',
+    };
+
+    const completeCycle = async (reasons: typeof first) => {
+      await quarantine('inc-auth-checks');
+      expect((await revalidateQuarantinedRoot('mem-suspicious-root', reasons.root, 'audit-analyst')).ok).toBe(true);
+      expect((await revalidateMemory('mem-derived-plan', reasons.memory, 'audit-analyst')).ok).toBe(true);
+      expect((await revalidateDecision('dec-deploy', reasons.decision, 'audit-analyst')).ok).toBe(true);
+    };
+
+    await completeCycle(first);
+    // Retrying completed actions must not create a second audit event.
+    expect((await revalidateQuarantinedRoot('mem-suspicious-root', first.root, 'audit-analyst')).ok).toBe(false);
+    expect((await revalidateMemory('mem-derived-plan', first.memory, 'audit-analyst')).ok).toBe(false);
+    expect((await revalidateDecision('dec-deploy', first.decision, 'audit-analyst')).ok).toBe(true);
+    let events = await listIncidentAudit('inc-auth-checks');
+    expect(events.filter((event) => /revalidated$/.test(event.type))).toHaveLength(3);
+
+    await completeCycle(second);
+    events = await listIncidentAudit('inc-auth-checks');
+    const revalidations = events.filter((event) => /revalidated$/.test(event.type));
+    expect(revalidations).toHaveLength(6);
+    expect(new Set(revalidations.map((event) => event.id)).size).toBe(6);
+    expect(revalidations.map((event) => event.reason)).toEqual(expect.arrayContaining([
+      first.root, first.memory, first.decision,
+      second.root, second.memory, second.decision,
+    ]));
+    for (const event of revalidations) {
+      expect(Number.isNaN(Date.parse(event.createdAt))).toBe(false);
+    }
+
+    const db = await testDb();
+    const state = await db.selectGraph(TEST_GRAPH).roQuery(
+      `MATCH (root:Memory {id:'mem-suspicious-root'}),
+             (memory:Memory {id:'mem-derived-plan'}),
+             (decision:Decision {id:'dec-deploy'})
+       RETURN root.revalidatedAt AS rootAt, memory.revalidatedAt AS memoryAt,
+              decision.lastValidatedAt AS decisionAt`,
+    );
+    const latest = (state.data as unknown as { rootAt: string; memoryAt: string; decisionAt: string }[])[0];
+    expect(revalidations.find((event) => event.reason === second.root)?.createdAt).toBe(latest.rootAt);
+    expect(revalidations.find((event) => event.reason === second.memory)?.createdAt).toBe(latest.memoryAt);
+    expect(revalidations.find((event) => event.reason === second.decision)?.createdAt).toBe(latest.decisionAt);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Adversarial tests: graph API incident path fields
 // ---------------------------------------------------------------------------

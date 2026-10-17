@@ -1,6 +1,6 @@
 import { query, roQuery } from '../db/falkordb.js';
 import { computeBlastRadius } from './blastRadius.js';
-import { nowIso, TRAVERSAL } from '../lib/types.js';
+import { newId, nowIso, TRAVERSAL } from '../lib/types.js';
 
 export interface QuarantineReport {
   incidentId: string;
@@ -144,7 +144,9 @@ export async function revalidateMemory(
          ON CREATE SET e.type='memory_revalidated', e.actor=$actor, e.createdAt=$ts, e.reason=$reason
      )
      RETURN m.id AS id`,
-    { mid: memoryId, ts, reason, eid: `memory-${memoryId}-revalidated`, actor },
+    // A retry cannot reach this write after the status transition; a new UUID
+    // therefore identifies this distinct, successfully-applied review action.
+    { mid: memoryId, ts, reason, eid: newId('evt'), actor },
   );
 
   return { ok: true, memoryId, previousStatus, newStatus: 'trusted', revalidatedAt: ts, reason };
@@ -176,7 +178,9 @@ export async function revalidateQuarantinedRoot(
        ON CREATE SET e.type='root_revalidated', e.actor=$actor, e.createdAt=$ts, e.reason=$reason
      )
      RETURN m.id AS id`,
-    { mid: memoryId, ts, reason, eid: `root-${memoryId}-revalidated`, actor },
+    // The state gate above keeps retries out of this write, while every later
+    // quarantine/revalidation cycle receives an independently auditable event.
+    { mid: memoryId, ts, reason, eid: newId('evt'), actor },
   );
   return { ok: true, memoryId };
 }
@@ -221,7 +225,9 @@ export async function revalidateDecision(
        ON CREATE SET e.type='decision_revalidated', e.actor=$actor, e.createdAt=$ts, e.reason=$reason
      )
      RETURN d.id AS id`,
-    { did: decisionId, ts, reason, eid: `decision-${decisionId}-revalidated`, actor },
+    // A revalidated decision returns before this write on retry, so this UUID
+    // is per successful revalidation action rather than per request attempt.
+    { did: decisionId, ts, reason, eid: newId('evt'), actor },
   );
   return { ok: true, decisionId };
 }
