@@ -46,12 +46,13 @@ RETURN DISTINCT d.id AS decisionId
 /**
  * Chain query: returns complete memory+decision chains starting from root.
  * Each row: chain = [rootId, ...intermediateMemoryIds, consumerDecisionId]
- * decisionId is the consuming Decision node at the end of the chain.
+ * `nodes(path)` includes both matched endpoints, so the final Decision is
+ * already present and must not be appended again.
  */
 const CHAIN_CYPHER = `
 MATCH (root:Memory {id: $mid})
 MATCH path = (root)<-[:DERIVED_FROM*0..${TRAVERSAL.maxDepth}]-(m:Memory)<-[:DEPENDS_ON]-(d:Decision)
-RETURN d.id AS decisionId, [x IN nodes(path) | x.id] + [d.id] AS chain
+RETURN d.id AS decisionId, [x IN nodes(path) | x.id] AS chain
 LIMIT $maxNodes
 `;
 

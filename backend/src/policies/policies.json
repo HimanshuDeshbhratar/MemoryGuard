@@ -21,7 +21,7 @@
       "confidence": "policy_conflict",
       "matchers": [
         { "type": "regex", "field": "content", "pattern": "\\b(api[-_ ]?key|secret|token|password|passwd|private[-_ ]?key|access[-_ ]?credential|connection[-_ ]?string)\\b" },
-        { "type": "regex", "field": "content", "pattern": "\\b(store|save|write|persist|copy|record|remember)\\b" }
+        { "type": "regex", "field": "content", "pattern": "\\b(store|save|write|persist|copy|record|remember)\\b|\\bapi[-_ ]?key\\s*[:=]\\s*[A-Za-z0-9_\\-]{8,}" }
       ]
     },
     {
@@ -45,7 +45,34 @@
       "confidence": "signal",
       "matchers": [
         { "type": "regex", "field": "sourceTrusted", "pattern": "^false$" },
-        { "type": "regex", "field": "content", "pattern": "\\b(ignore|disregard|override|supersede|instead of)\\b.*\\b(polic(?:y|ies)|rules?|instructions?|previous)\\b|\\b(instructions?|directives?)\\s+(from|in)\\s+(the\\s+)?(page|email|document|attachment|conversation|user)" }
+        { "type": "regex", "field": "content", "pattern": "\\b(ignore|disregard|override|supersede|instead of)\\b.*\\b(polic(?:y|ies)|rules?|instructions?|previous)\\b|\\b(instructions?|directives?)\\s+(from|in)\\s+(the\\s+)?(page|email|document|attachment|conversation|user)|\\btrust\\s+(the\\s+)?(most\\s+)?recent(ly)?\\s+(received\\s+)?instructions?\\b.*\\bcontradict" }
+      ],
+      "unless": [
+        { "type": "regex", "field": "content", "pattern": "\\b(do not|don't|never)\\s+(follow|obey|trust)\\b" }
+      ]
+    },
+    {
+      "id": "POL-AUTH-DEPLOY-001",
+      "title": "Authentication checks must not be disabled in a deployment plan",
+      "statement": "Disabling authentication checks in a deployment or release plan is a suspicious signal when the environment is not known to be production.",
+      "severity": "high",
+      "confidence": "signal",
+      "matchers": [
+        { "type": "regex", "field": "content", "pattern": "\\b(disable|disables|disabled|bypass|skip|skipping|turn(?:ing)? off|deactivate)\\b" },
+        { "type": "regex", "field": "content", "pattern": "\\bauth(entication)?(\\s+checks?)?\\b|\\bsign[- ]?in\\b|\\blogin\\b|\\b2fa\\b|\\bmfa\\b" },
+        { "type": "regex", "field": "content", "pattern": "\\b(deploy(ment|ing)?|release|rollout|runbook)\\b" }
+      ]
+    },
+    {
+      "id": "POL-SECCTRL-001",
+      "title": "Security controls must not be disabled for load testing without review",
+      "statement": "Disabling a WAF in staging for load or performance testing is a suspicious signal requiring review.",
+      "severity": "high",
+      "confidence": "signal",
+      "matchers": [
+        { "type": "regex", "field": "content", "pattern": "\\b(disable|disabled|bypass|turn(?:ing)? off|deactivate)\\b" },
+        { "type": "regex", "field": "content", "pattern": "\\bWAF\\b|\\bweb application firewall\\b" },
+        { "type": "regex", "field": "content", "pattern": "\\b(staging|load testing|performance test)\\b" }
       ]
     }
   ]

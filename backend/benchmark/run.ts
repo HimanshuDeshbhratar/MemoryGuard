@@ -19,6 +19,7 @@ interface EvalResult {
     entry: CorpusEntry;
     actualTriggered: boolean;
     actualConfidence: string | undefined;
+    categoryMatches: boolean;
     /** null for benign expected outcomes (they are not TP/FP in terms of detection). */
     classification: 'TP' | 'FP' | 'FN' | 'TN';
 }
@@ -30,6 +31,11 @@ function classifyResult(expected: ExpectedOutcome, triggered: boolean): EvalResu
     if (shouldDetect && !triggered) return 'FN';
     if (!shouldDetect && triggered) return 'FP';
     return 'TN';
+}
+
+function expectedConfidence(expected: ExpectedOutcome): string | undefined {
+    if (expected === 'conflict') return 'policy_conflict';
+    return expected === 'signal' ? 'signal' : undefined;
 }
 
 function pct(n: number, d: number): string {
@@ -45,10 +51,12 @@ function run(): void {
             sourceTrusted: entry.sourceTrusted,
         });
         const classification = classifyResult(entry.expected, ev.triggered);
+        const categoryMatches = !ev.triggered || ev.confidence === expectedConfidence(entry.expected);
         return {
             entry,
             actualTriggered: ev.triggered,
             actualConfidence: ev.confidence,
+            categoryMatches,
             classification,
         };
     });
@@ -69,10 +77,9 @@ function run(): void {
     console.log('─'.repeat(65));
     for (const r of results) {
         const triggered = r.actualTriggered ? 'yes' : 'no';
-        const conf = r.actualConfidence ?? '—';
-        console.log(
-            `${r.entry.id.padEnd(6)}${r.entry.expected.padEnd(12)}${triggered.padEnd(11)}${conf.padEnd(18)}${r.classification}`,
-        );
+        const conf = r.actualTriggered ? (r.actualConfidence ?? 'unknown') : '—';
+        const category = r.actualTriggered && !r.categoryMatches ? ' category-mismatch' : '';
+        console.log(`${r.entry.id.padEnd(6)}${r.entry.expected.padEnd(12)}${triggered.padEnd(11)}${conf.padEnd(18)}${r.classification}${category}`);
     }
     console.log('─'.repeat(65));
 
@@ -80,6 +87,7 @@ function run(): void {
     console.log(`Precision : ${pct(TP, TP + FP)}  (correctness of positive detections)`);
     console.log(`Recall    : ${pct(TP, TP + FN)}  (coverage of true positives)`);
     console.log(`False positives: ${FP}`);
+    console.log('These results cover this small synthetic corpus only; they are not a production-accuracy claim.');
 
     // ─── Per-category breakdown ─────────────────────────────────────────────────
     const categories = [...new Set(CORPUS.map((e) => e.category))];
@@ -89,7 +97,8 @@ function run(): void {
         const catTP = catResults.filter((r) => r.classification === 'TP').length;
         const catFN = catResults.filter((r) => r.classification === 'FN').length;
         const catFP = catResults.filter((r) => r.classification === 'FP').length;
-        console.log(`  ${cat.padEnd(32)} TP=${catTP} FP=${catFP} FN=${catFN}`);
+        const catTN = catResults.filter((r) => r.classification === 'TN').length;
+        console.log(`  ${cat.padEnd(32)} TP=${catTP} FP=${catFP} FN=${catFN} TN=${catTN}`);
     }
 
     // ─── Heuristic limits commentary ────────────────────────────────────────────
@@ -102,7 +111,7 @@ function run(): void {
         console.log(
             '  requires graph lineage context that regex/keyword policies cannot provide.',
         );
-        console.log('  These are documented FNs, not bugs.');
+        console.log('  They remain policy-only benign cases; graph lineage is evaluated separately.');
         for (const r of provenanceOnly) {
             console.log(`    ${r.entry.id}: ${r.entry.notes}`);
         }
@@ -110,11 +119,15 @@ function run(): void {
 
     console.log('\n══════════════════════════════════════════════\n');
 
-    // Exit non-zero if any unexpected FP is found (provenanceDependent FNs are accepted).
+    // Any false positive or unexplained false negative is a benchmark failure.
     const unexpectedFP = results.filter((r) => r.classification === 'FP');
-    if (unexpectedFP.length > 0) {
-        console.error(`Benchmark failed: ${unexpectedFP.length} unexpected false positive(s):`);
+    const unexplainedFN = results.filter((r) => r.classification === 'FN' && !r.entry.provenanceDependent);
+    const categoryMismatches = results.filter((r) => r.actualTriggered && !r.categoryMatches);
+    if (unexpectedFP.length > 0 || unexplainedFN.length > 0 || categoryMismatches.length > 0) {
+        console.error(`Benchmark failed: ${unexpectedFP.length} unexpected false positive(s), ${unexplainedFN.length} unexplained false negative(s), ${categoryMismatches.length} category mismatch(es):`);
         for (const r of unexpectedFP) console.error(`  ${r.entry.id}: ${r.entry.notes}`);
+        for (const r of unexplainedFN) console.error(`  ${r.entry.id}: ${r.entry.notes}`);
+        for (const r of categoryMismatches) console.error(`  ${r.entry.id}: expected ${r.entry.expected}, got ${r.actualConfidence}`);
         process.exit(1);
     }
 }

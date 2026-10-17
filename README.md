@@ -26,11 +26,9 @@ MemoryGuard is an incident-response platform for **compromised AI-agent memories
 Prerequisites: Node 18+, Docker, npm.
 
 ```bash
-# 1. Start FalkorDB (persists across restarts via a volume)
-docker run -d --name falkordb-memoryguard \
-  -p 6379:6379 \
-  -v falkordb-data:/data \
-  falkordb/falkordb:latest
+# 1. Start FalkorDB (binds only to localhost and persists via a volume)
+docker compose up -d falkordb
+docker compose ps
 
 # 2. Backend (port 4100; creates constraints and seeds on first start)
 cd backend
@@ -133,6 +131,17 @@ cd backend
 npm test        # or: npx vitest run
 ```
 
+PowerShell local test setup (the suite uses only the dedicated
+`MEMORYGUARD_TEST` graph and deletes that graph before/after its run; it does
+not reset `MEMORYGUARD` or any other graph):
+
+```powershell
+docker compose up -d falkordb
+docker compose ps                 # wait until falkordb is healthy
+cd backend
+npm test
+```
+
 29 automated tests cover: seed idempotency, policy detection of the synthetic conflict, benign-memory non-triggering, multi-hop downstream traversal, exclusion of unrelated memories, affected-decision discovery, quarantined persisted state, `review_required` propagation, idempotent quarantine, revalidation blocking while quarantined, 400/404 handling, deterministic degradation when the LLM adapter fails/absent, dashboard metrics matching the graph, and reset-reseed parity.
 
 Frontend:
@@ -159,6 +168,7 @@ npm run typecheck && npm run build
 
 - Backend tests and dev server assume `localhost` FalkorDB with default settings (`FALKORDB_PORT` etc. configurable).
 - Blast-radius traversal is bounded (max depth and node count) and reports truncation.
+- The installed FalkorDB JavaScript client exposes graph queries but no transaction API. Quarantine uses idempotent `MERGE`/status writes, so retrying the same request repairs any interrupted later event/flag writes; each revalidation writes its status and audit event in one Cypher query.
 - The LLM narrative is advisory only and disabled by default; without keys the deterministic pipeline is complete. When downgraded to `provider_required` the investigation still succeeds without it.
 - The demo reset clears the whole `MEMORYGUARD` graph; it is intended for local demo use only.
 - There is no auth layer for local demo simplicity — like the reset route, it must not be exposed to the internet as-is.

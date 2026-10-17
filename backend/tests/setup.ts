@@ -7,11 +7,13 @@ process.env.AUTO_SEED = 'false';
 process.env.NODE_ENV = 'test';
 
 export const TEST_GRAPH = 'MEMORYGUARD_TEST';
+const testHost = process.env.FALKORDB_HOST ?? '127.0.0.1';
+const testPort = Number(process.env.FALKORDB_PORT ?? 6379);
 
 let db: Awaited<ReturnType<typeof FalkorDB.connect>> | null = null;
 
 export async function testDb() {
-  if (!db) db = await FalkorDB.connect({ socket: { host: '127.0.0.1', port: 6379 } });
+  if (!db) db = await FalkorDB.connect({ socket: { host: testHost, port: testPort } });
   return db;
 }
 

@@ -31,7 +31,8 @@ export interface EvaluationMatch {
 
 export interface PolicyEvaluation {
   triggered: boolean;
-  confidence: PolicyConfidence;
+  /** Present only when a policy actually triggered. */
+  confidence?: PolicyConfidence;
   policy?: Policy;
   matches: EvaluationMatch[];
   evidenceNote: string;
@@ -105,7 +106,6 @@ export function evaluate(input: EvaluationInput): PolicyEvaluation {
   if (!pick) {
     return {
       triggered: false,
-      confidence: 'policy_conflict',
       matches: [],
       evidenceNote: 'no protected-policy conflict detected',
     };

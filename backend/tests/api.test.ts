@@ -1,11 +1,11 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { app } from '../src/app.js';
 import { clearTestGraph, TEST_GRAPH, testDb } from './setup.js';
 import { closeFalkorDB } from '../src/db/falkordb.js';
 import { seed } from '../src/services/demo.js';
 import { computeBlastRadius } from '../src/services/blastRadius.js';
-import { quarantine, revalidateMemory, revalidateDecision, revalidateQuarantinedRoot } from '../src/services/containment.js';
+import { quarantine, revalidateMemory, revalidateDecision, revalidateQuarantinedRoot, listIncidentAudit } from '../src/services/containment.js';
 import { explainIncident } from '../src/services/llm.js';
 
 const agent = () => request(app);
@@ -60,6 +60,16 @@ describe('graph traversal / blast radius', () => {
     expect(chains.some((c) => c.includes('mem-suspicious-root') && c.includes('mem-derived-plan') && c.includes('dec-deploy'))).toBe(true);
   });
 
+  it('returns each complete chain with the decision exactly once at its end', async () => {
+    const blast = await computeBlastRadius('inc-auth-checks');
+    const chain = blast.chains.find((c) => c.decisionId === 'dec-deploy');
+    expect(chain).toEqual({
+      decisionId: 'dec-deploy',
+      chain: ['mem-suspicious-root', 'mem-derived-plan', 'dec-deploy'],
+    });
+    expect(chain?.chain.filter((id) => id === chain.decisionId)).toHaveLength(1);
+  });
+
   it('returns no downstream memories for an isolated memory; only its direct decision is affected', async () => {
     const blast = await computeBlastRadius(undefined, 'mem-unrelated-trusted');
     expect(blast.downstreamMemoryIds).toHaveLength(0);
@@ -87,6 +97,7 @@ describe('quarantine + revalidation', () => {
     const report2 = await quarantine('inc-auth-checks');
     // Idempotent: same root quarantined, no records regress, no duplicate flags.
     expect(report2.quarantined).toEqual(report1.quarantined);
+    expect((await listIncidentAudit('inc-auth-checks')).filter((event) => event.type === 'quarantine_applied')).toHaveLength(1);
     const checkDependent = async () => {
       const db = await testDb();
       const res = await db.selectGraph(TEST_GRAPH).roQuery('MATCH (m:Memory {id:"mem-derived-plan"}) RETURN m.status AS s');
@@ -242,7 +253,7 @@ describe('transitive dependency blocking (revalidateDecision)', () => {
    *
    * We reset to a clean demo state before each test in this suite.
    */
-  beforeAll(async () => {
+  beforeEach(async () => {
     // Reset to fresh demo state so mem-suspicious-root is 'suspicious' again.
     const db = await testDb();
     await clearTestGraph();
@@ -251,9 +262,10 @@ describe('transitive dependency blocking (revalidateDecision)', () => {
     // Create a 3-hop chain: mem-suspicious-root ← mem-hop-b ← mem-hop-c
     // and a decision dec-transitive depending on mem-hop-c.
     await db.selectGraph(TEST_GRAPH).query(
-      `MERGE (b:Memory {id:'mem-hop-b'}) SET b.content='derived hop B', b.status='trusted', b.synthetic=true
+      `MATCH (root:Memory {id:'mem-suspicious-root'})
+       MERGE (b:Memory {id:'mem-hop-b'}) SET b.content='derived hop B', b.status='trusted', b.synthetic=true
        MERGE (c:Memory {id:'mem-hop-c'}) SET c.content='derived hop C', c.status='trusted', c.synthetic=true
-       MERGE (b)-[:DERIVED_FROM]->(root:Memory {id:'mem-suspicious-root'})
+       MERGE (b)-[:DERIVED_FROM]->(root)
        MERGE (c)-[:DERIVED_FROM]->(b)
        MERGE (dec:Decision {id:'dec-transitive'})
          SET dec.description='Transitive dep decision', dec.status='review_required', dec.synthetic=true
@@ -267,6 +279,7 @@ describe('transitive dependency blocking (revalidateDecision)', () => {
     // dec-transitive -> mem-hop-c -> mem-hop-b -> mem-suspicious-root (quarantined)
     // The decision's direct dependency (mem-hop-c) is still trusted,
     // but mem-suspicious-root is quarantined upstream.
+    const db = await testDb();
     const result = await revalidateDecision('dec-transitive', 'Trying to approve despite upstream quarantine');
     expect(result.ok).toBe(false);
     const blockedBy = (result as { blockedBy: string[] }).blockedBy;
@@ -308,6 +321,44 @@ describe('transitive dependency blocking (revalidateDecision)', () => {
       .roQuery('MATCH (m:Memory {id:"mem-derived-plan"}) RETURN m.status AS s');
     const status = ((res.data as unknown as { s: string }[])[0] as { s: string }).s;
     expect(status).toBe('review_required');
+  });
+});
+
+describe('decision revalidation safety edges', () => {
+  beforeEach(async () => {
+    await clearTestGraph();
+    await seed();
+  });
+
+  it('allows a decision with no dependencies to be revalidated', async () => {
+    const db = await testDb();
+    await db.selectGraph(TEST_GRAPH).query(
+      "CREATE (d:Decision {id:'dec-no-deps', status:'review_required', synthetic:true})",
+    );
+    await expect(revalidateDecision('dec-no-deps', 'No dependencies exist and the decision was independently reviewed.')).resolves.toMatchObject({ ok: true });
+  });
+
+  it('blocks every direct dependency requiring review, including after an earlier revalidation', async () => {
+    const db = await testDb();
+    await db.selectGraph(TEST_GRAPH).query(
+      `MATCH (safe:Memory {id:'mem-unrelated-trusted'}), (unsafe:Memory {id:'mem-derived-plan'})
+       SET unsafe.status='review_required'
+       CREATE (d:Decision {id:'dec-multiple-deps', status:'review_required', synthetic:true})
+       CREATE (d)-[:DEPENDS_ON]->(safe)
+       CREATE (d)-[:DEPENDS_ON]->(unsafe)`,
+    );
+    const blocked = await revalidateDecision('dec-multiple-deps', 'Attempting review with one unsafe direct dependency.');
+    expect(blocked).toMatchObject({ ok: false, blockedBy: expect.arrayContaining(['mem-derived-plan']) });
+
+    await db.selectGraph(TEST_GRAPH).query(
+      "CREATE (d:Decision {id:'dec-stale-revalidated', status:'review_required', synthetic:true})",
+    );
+    expect((await revalidateDecision('dec-stale-revalidated', 'Initial independent review with no dependencies.')).ok).toBe(true);
+    await db.selectGraph(TEST_GRAPH).query(
+      "MATCH (d:Decision {id:'dec-stale-revalidated'}), (m:Memory {id:'mem-derived-plan'}) SET m.status='review_required' CREATE (d)-[:DEPENDS_ON]->(m)",
+    );
+    const stale = await revalidateDecision('dec-stale-revalidated', 'Repeated request after a dependency changed.');
+    expect(stale).toMatchObject({ ok: false, blockedBy: expect.arrayContaining(['mem-derived-plan']) });
   });
 });
 

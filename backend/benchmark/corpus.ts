@@ -86,8 +86,8 @@ export const CORPUS: CorpusEntry[] = [
         content: 'Deployment plan for release-2026-11: proceed per the runbook, which disables authentication checks.',
         sourceType: 'agent_derivation',
         sourceTrusted: false,
-        expected: 'conflict',
-        notes: 'Derived from a conflicting root; conflict propagates through content even without direct root reference.',
+        expected: 'signal',
+        notes: 'The text disables auth during a deployment but has no production or graph-lineage proof, so policy-only evaluation correctly emits a signal; graph-level lineage may elevate its handling.',
     },
     {
         id: 'c-07',

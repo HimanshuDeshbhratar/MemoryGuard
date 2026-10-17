@@ -1,6 +1,6 @@
 import { query, roQuery } from '../db/falkordb.js';
 import { computeBlastRadius } from './blastRadius.js';
-import { newId, nowIso, TRAVERSAL } from '../lib/types.js';
+import { nowIso, TRAVERSAL } from '../lib/types.js';
 
 export interface QuarantineReport {
   incidentId: string;
@@ -136,22 +136,15 @@ export async function revalidateMemory(
   const ts = nowIso();
   await query(
     `MATCH (m:Memory {id:$mid})
+     OPTIONAL MATCH (m)-[:FLAGGED_BY]->(i:Incident)
+     WITH m, collect(DISTINCT i) AS incidents
      SET m.status='trusted', m.updatedAt=$ts, m.revalidatedAt=$ts, m.revalidationReason=$reason
-     RETURN m.id AS id`,
-    { mid: memoryId, ts, reason },
-  );
-  await query(
-    `MATCH (m:Memory {id:$mid})
-     OPTIONAL MATCH (i:Incident)-[:FLAGGED_BY]->(m)
-     WITH m, collect(i.id) AS incidentIds
-     UNWIND (CASE WHEN size(incidentIds)=0 THEN [null] ELSE incidentIds END) AS iid
-     WITH m, iid
-     OPTIONAL MATCH (i2:Incident) WHERE i2.id = iid
-     FOREACH (_ IN CASE WHEN i2 IS NOT NULL THEN [1] ELSE [] END |
-       MERGE (i2)-[:HAS_EVENT]->(e:AuditEvent {id:$eid})
+     FOREACH (incident IN incidents |
+       MERGE (incident)-[:HAS_EVENT]->(e:AuditEvent {id:$eid})
          ON CREATE SET e.type='memory_revalidated', e.actor=$actor, e.createdAt=$ts, e.reason=$reason
-     )`,
-    { mid: memoryId, ts, reason, eid: newId('evt'), actor },
+     )
+     RETURN m.id AS id`,
+    { mid: memoryId, ts, reason, eid: `memory-${memoryId}-revalidated`, actor },
   );
 
   return { ok: true, memoryId, previousStatus, newStatus: 'trusted', revalidatedAt: ts, reason };
@@ -175,15 +168,15 @@ export async function revalidateQuarantinedRoot(
   const ts = nowIso();
   await query(
     `MATCH (m:Memory {id:$mid})
+     OPTIONAL MATCH (i:Incident)-[:TARGETS]->(m)
+     WITH m, collect(DISTINCT i) AS incidents
      SET m.status='trusted', m.updatedAt=$ts, m.revalidatedAt=$ts, m.revalidationReason=$reason
+     FOREACH (incident IN incidents |
+       MERGE (incident)-[:HAS_EVENT]->(e:AuditEvent {id:$eid})
+       ON CREATE SET e.type='root_revalidated', e.actor=$actor, e.createdAt=$ts, e.reason=$reason
+     )
      RETURN m.id AS id`,
-    { mid: memoryId, ts, reason },
-  );
-  await query(
-    `MATCH (i:Incident)-[:TARGETS]->(m:Memory {id:$mid})
-     MERGE (i)-[:HAS_EVENT]->(e:AuditEvent {id:$eid})
-       ON CREATE SET e.type='root_revalidated', e.actor=$actor, e.createdAt=$ts, e.reason=$reason`,
-    { mid: memoryId, ts, reason, eid: newId('evt'), actor },
+    { mid: memoryId, ts, reason, eid: `root-${memoryId}-revalidated`, actor },
   );
   return { ok: true, memoryId };
 }
@@ -210,25 +203,25 @@ export async function revalidateDecision(
   if (!rows.length) throw new NotFoundError(`decision ${decisionId} not found`);
   const { status, blocked } = rows[0];
   const badDeps = (blocked ?? []).filter((x): x is string => Boolean(x));
-  if (status === 'revalidated') {
-    return { ok: true, decisionId }; // idempotent
-  }
   if (badDeps.length > 0) {
     return { ok: false, blockedBy: badDeps };
+  }
+  if (status === 'revalidated') {
+    return { ok: true, decisionId }; // idempotent only while its dependencies remain safe
   }
 
   const ts = nowIso();
   await query(
     `MATCH (d:Decision {id:$did})
+     OPTIONAL MATCH (i:Incident)-[:AFFECTS]->(d)
+     WITH d, collect(DISTINCT i) AS incidents
      SET d.status='revalidated', d.lastValidatedAt=$ts, d.revalidationReason=$reason
+     FOREACH (incident IN incidents |
+       MERGE (incident)-[:HAS_EVENT]->(e:AuditEvent {id:$eid})
+       ON CREATE SET e.type='decision_revalidated', e.actor=$actor, e.createdAt=$ts, e.reason=$reason
+     )
      RETURN d.id AS id`,
-    { did: decisionId, ts, reason },
-  );
-  await query(
-    `MATCH (i:Incident)-[:AFFECTS]->(d:Decision {id:$did})
-     MERGE (i)-[:HAS_EVENT]->(e:AuditEvent {id:$eid})
-       ON CREATE SET e.type='decision_revalidated', e.actor=$actor, e.createdAt=$ts, e.reason=$reason`,
-    { did: decisionId, ts, reason, eid: newId('evt'), actor },
+    { did: decisionId, ts, reason, eid: `decision-${decisionId}-revalidated`, actor },
   );
   return { ok: true, decisionId };
 }
