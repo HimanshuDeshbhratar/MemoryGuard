@@ -147,8 +147,12 @@ export async function getMemoryWithProvenance(id: string): Promise<MemoryProvena
       { id },
     ),
     roQuery<{ id: string; description: string; status: string }>(
-      `MATCH (d:Decision)-[:DEPENDS_ON]->(m:Memory {id:$id})
-       RETURN d.id AS id, d.description AS description, d.status AS status ORDER BY d.createdAt`,
+      `MATCH (d:Decision)-[:DEPENDS_ON]->(dependency:Memory)
+       MATCH (dependency)-[:DERIVED_FROM*0..6]->(root:Memory {id:$id})
+       RETURN DISTINCT d.id AS id,
+              d.description AS description,
+              d.status AS status
+       ORDER BY id`,
       { id },
     ),
     roQuery<{ id: string; name: string; role: string }>(

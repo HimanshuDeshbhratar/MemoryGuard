@@ -61,7 +61,7 @@ export default function SettingsPage({ onRefresh, dataVersion }: { onRefresh: ()
             <dt>Graph name</dt>
             <dd>{health?.graph ?? '—'}</dd>
             <dt>Frontend ↔ API</dt>
-            <dd>same-origin via Vite proxy /api → localhost:4100</dd>
+            <dd>same-origin via Vite proxy /api → localhost:4000</dd>
           </div>
         </div>
 

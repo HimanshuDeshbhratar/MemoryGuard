@@ -82,14 +82,32 @@ export async function quarantine(incidentId: string): Promise<QuarantineReport> 
 
   // 5. Re-run impact analysis for the report.
   const blast = await computeBlastRadius(incidentId);
+  // Report the persisted containment state, not merely the rows transitioned by
+  // this invocation. This keeps repeated quarantine reports idempotent.
+  const [currentMemories, currentDecisions] = await Promise.all([
+    roQuery<{ id: string; status: string }>(
+      `MATCH (m:Memory)
+       WHERE m.id IN $ids
+       RETURN m.id AS id, m.status AS status`,
+      { ids: blast.downstreamMemoryIds },
+    ),
+    roQuery<{ id: string; status: string }>(
+      `MATCH (d:Decision)
+       WHERE d.id IN $ids
+       RETURN d.id AS id, d.status AS status`,
+      { ids: blast.affectedDecisionIds },
+    ),
+  ]);
+  const reviewMemories = currentMemories.filter((memory) => memory.status === 'review_required').map((memory) => memory.id);
+  const reviewDecisions = currentDecisions.filter((decision) => decision.status === 'review_required').map((decision) => decision.id);
   return {
     incidentId,
     suspectMemoryId: memoryId,
     quarantined: [memoryId],
-    flaggedForReview: { memories: flaggedMemories, decisions: flaggedDecisions },
+    flaggedForReview: { memories: reviewMemories, decisions: reviewDecisions },
     unresolved: {
-      memories: blast.downstreamMemoryIds.filter((id) => !flaggedMemories.includes(id)),
-      decisions: blast.affectedDecisionIds.filter((id) => !flaggedDecisions.includes(id)),
+      memories: blast.downstreamMemoryIds.filter((id) => !reviewMemories.includes(id)),
+      decisions: blast.affectedDecisionIds.filter((id) => !reviewDecisions.includes(id)),
     },
   };
 }

@@ -1,6 +1,6 @@
 # MemoryGuard REST API
 
-Base URL (dev): `http://localhost:4100` — the Vite dev server proxies `/api` automatically.
+Base URL (dev): `http://localhost:4000` — the Vite dev server proxies `/api` automatically.
 
 All responses are JSON. Errors use structured bodies:
 
@@ -43,6 +43,7 @@ Metrics are computed by live graph queries (`services/metrics.ts`); the activity
 | ------ | --------------------------------- | ------------------------------------------------------------------------------------------------- |
 | GET    | `/api/incidents`                  | List with severity, status, suspect memory, counts, agents                                       |
 | GET    | `/api/incidents/:id`              | Full detail: reason, evidence records, `remediation`, containment state                          |
+| GET    | `/api/incidents/:id/containment-status` | Read-only reconciliation of the incident status with downstream-memory and affected-decision review flags |
 | POST   | `/api/incidents/:id/investigate`  | Runs blast-radius traversal: `{ incident, evidencePaths, impact: { suspectMemoryId, downstreamMemoryIds, affectedDecisionIds, memoryDepth, chains, truncated } }` |
 | POST   | `/api/incidents/:id/quarantine`   | Body `{ "confirmed": true }` required. Quarantines the suspect memory, flags dependents `review_required`, sets the incident `contained`, writes an audit event. Idempotent. |
 | POST   | `/api/incidents/:id/explanation`  | Optional LLM narrative (404-safe; returns deterministic fallback when no provider is configured)  |

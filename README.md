@@ -30,12 +30,12 @@ Prerequisites: Node 18+, Docker, npm.
 docker compose up -d falkordb
 docker compose ps
 
-# 2. Backend (port 4100; creates constraints and seeds on first start)
+# 2. Backend (port 4000; creates constraints and seeds on first start)
 cd backend
 npm install
-npm run dev            # PORT=4100 AUTO_SEED=true tsx src/server.ts
+npm run dev            # PORT=4000 AUTO_SEED=true tsx src/server.ts
 
-# 3. Frontend (Vite dev server proxies /api -> localhost:4100)
+# 3. Frontend (Vite dev server proxies /api -> localhost:4000)
 cd ../frontend
 npm install
 npm run dev            # http://localhost:5173
@@ -44,9 +44,9 @@ npm run dev            # http://localhost:5173
 Seed / reset (both idempotent and restricted to demo use):
 
 ```bash
-curl -X POST http://localhost:4100/api/demo/seed
+curl -X POST http://localhost:4000/api/demo/seed
 # reset requires ALLOW_DEMO_RESET=true (default) and an explicit confirmation body:
-curl -X POST http://localhost:4100/api/demo/reset \
+curl -X POST http://localhost:4000/api/demo/reset \
   -H 'Content-Type: application/json' \
   -d '{"confirmPhrase":"reset-demo","acknowledgeSynthetic":true}'
 ```
@@ -71,7 +71,7 @@ No API key or paid service is required; the LLM adapter is off unless configured
 `backend/.env.example`:
 
 ```ini
-PORT=4100
+PORT=4000
 FALKORDB_HOST=127.0.0.1
 FALKORDB_PORT=6379
 FALKORDB_GRAPH=MEMORYGUARD
@@ -142,7 +142,7 @@ cd backend
 npm test
 ```
 
-29 automated tests cover: seed idempotency, policy detection of the synthetic conflict, benign-memory non-triggering, multi-hop downstream traversal, exclusion of unrelated memories, affected-decision discovery, quarantined persisted state, `review_required` propagation, idempotent quarantine, revalidation blocking while quarantined, 400/404 handling, deterministic degradation when the LLM adapter fails/absent, dashboard metrics matching the graph, and reset-reseed parity.
+The automated suite covers seed idempotency, policy detection of the synthetic conflict, benign-memory non-triggering, multi-hop downstream traversal, exclusion of unrelated memories, affected-decision discovery, quarantined persisted state, `review_required` propagation, idempotent quarantine reporting, revalidation blocking, audit-event idempotency, API validation, deterministic degradation when the LLM adapter fails or is absent, dashboard metrics, containment-status reconciliation, and reset-reseed parity.
 
 Frontend:
 

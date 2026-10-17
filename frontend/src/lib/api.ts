@@ -59,6 +59,14 @@ export interface IncidentDetail extends IncidentSummary {
   containedAt: string | null;
   evidence: EvidenceRecord[];
   remediation?: string[];
+  /** Persisted containment and revalidation audit events for this incident. */
+  audit: Array<{
+    id: string;
+    type: string;
+    actor: string;
+    reason: string;
+    createdAt: string;
+  }>;
 }
 
 export interface MemoryListItem {

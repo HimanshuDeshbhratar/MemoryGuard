@@ -225,7 +225,7 @@ export default function IncidentDetail({
                 <li key={i}>{r}</li>
               ))}
               {incident.status === 'open' && <li>Quarantine the suspect memory to prevent further derivation.</li>}
-              {incident.status === 'contained' && <li>Revalidate each flagged decision against a trusted source, then revalidate the quarantined root only after independent verification.</li>}
+              {incident.status === 'contained' && <li>After independent verification, revalidate the quarantined root first, then each flagged downstream memory, and finally each affected decision.</li>}
               <li>Every status below is persisted in FalkorDB; a restart or refresh does not reset it.</li>
             </ol>
           </div>
@@ -242,6 +242,26 @@ export default function IncidentDetail({
                   ? 'Blast radius computed; quarantine pending operator decision.'
                   : 'No quarantine applied yet.'}
             </p>
+          </div>
+
+          <div className="card">
+            <h3>Audit history</h3>
+            {incident.audit.length === 0 ? (
+              <Empty message="No containment or revalidation events recorded yet." />
+            ) : (
+              <div className="detail-list">
+                {incident.audit.map((event) => (
+                  <div key={event.id} className="card" style={{ padding: 10 }}>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <span className="badge neutral">{event.type.replace(/_/g, ' ')}</span>
+                      <span className="faint mono">{new Date(event.createdAt).toISOString()}</span>
+                    </div>
+                    <div style={{ marginTop: 6 }}>{event.reason || 'No reason recorded.'}</div>
+                    {event.actor && <div className="faint" style={{ marginTop: 4 }}>actor: {event.actor}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="card">

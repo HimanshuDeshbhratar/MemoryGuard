@@ -97,6 +97,9 @@ describe('quarantine + revalidation', () => {
     const report2 = await quarantine('inc-auth-checks');
     // Idempotent: same root quarantined, no records regress, no duplicate flags.
     expect(report2.quarantined).toEqual(report1.quarantined);
+    expect(report2.flaggedForReview.memories).toContain('mem-derived-plan');
+    expect(report2.flaggedForReview.decisions).toContain('dec-deploy');
+    expect(report2.unresolved).toEqual({ memories: [], decisions: [] });
     expect((await listIncidentAudit('inc-auth-checks')).filter((event) => event.type === 'quarantine_applied')).toHaveLength(1);
     const checkDependent = async () => {
       const db = await testDb();
@@ -126,6 +129,40 @@ describe('quarantine + revalidation', () => {
     const res = await db.selectGraph(TEST_GRAPH).roQuery('MATCH (m:Memory {id:"mem-derived-plan"}) RETURN m.status AS s, m.revalidationReason AS reason');
     const row = (res.data as unknown as { s: string; reason: string }[])[0] as { s: string; reason: string };
     expect(row.s).toBe('trusted');
+  });
+});
+
+describe('containment-status API', () => {
+  beforeEach(async () => {
+    await clearTestGraph();
+    await seed();
+  });
+
+  it('reconciles persisted incident, downstream-memory, and decision states without writing', async () => {
+    const initial = await agent().get('/api/incidents/inc-auth-checks/containment-status').expect(200);
+    expect(initial.body).toMatchObject({
+      incidentId: 'inc-auth-checks',
+      incidentStatus: 'open',
+      flaggedForReview: { memories: [], decisions: [] },
+    });
+    expect(initial.body.unresolved.memories).toContain('mem-derived-plan');
+    expect(initial.body.unresolved.decisions).toContain('dec-deploy');
+
+    await quarantine('inc-auth-checks');
+    const contained = await agent().get('/api/incidents/inc-auth-checks/containment-status').expect(200);
+    expect(contained.body).toMatchObject({
+      incidentId: 'inc-auth-checks',
+      incidentStatus: 'contained',
+      flaggedForReview: {
+        memories: expect.arrayContaining(['mem-derived-plan']),
+        decisions: expect.arrayContaining(['dec-deploy']),
+      },
+      unresolved: { memories: [], decisions: [] },
+    });
+  });
+
+  it('returns 404 for a missing incident', async () => {
+    await agent().get('/api/incidents/inc-nope/containment-status').expect(404);
   });
 });
 

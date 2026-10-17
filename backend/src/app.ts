@@ -2,7 +2,7 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import cors from 'cors';
 import { z, ZodError } from 'zod';
 import { env } from './env.js';
-import { ping } from './db/falkordb.js';
+import { ping, roQuery } from './db/falkordb.js';
 import { PROTECTED_POLICIES } from './policies/policies.js';
 import * as metrics from './services/metrics.js';
 import { graphView } from './services/graphView.js';
@@ -118,6 +118,60 @@ app.get('/api/incidents/:id', asyncRoute(async (req, res) => {
   if (!incident) throw new NotFoundError(`incident ${id} not found`);
   res.json(incident);
 }));
+
+// Read-only verification of incident containment
+app.get('/api/incidents/:id/containment-status', asyncRoute(async (req, res) => {
+  const { id } = incidentIdParam.parse(req.params);
+
+  const incident = await getIncident(id);
+  if (!incident) throw new NotFoundError(`incident ${id} not found`);
+
+  const impact = await computeBlastRadius(id);
+
+  const memoryIds = impact.downstreamMemoryIds;
+  const decisionIds = impact.affectedDecisionIds;
+
+  const [memories, decisions] = await Promise.all([
+    roQuery<{ id: string; status: string }>(
+      `MATCH (m:Memory)
+       WHERE m.id IN $ids
+       RETURN m.id AS id, m.status AS status`,
+      { ids: memoryIds },
+    ),
+    roQuery<{ id: string; status: string }>(
+      `MATCH (d:Decision)
+       WHERE d.id IN $ids
+       RETURN d.id AS id, d.status AS status`,
+      { ids: decisionIds },
+    ),
+  ]);
+
+  const flaggedMemories = memories
+    .filter(m => m.status === 'review_required')
+    .map(m => m.id);
+
+  const flaggedDecisions = decisions
+    .filter(d => d.status === 'review_required')
+    .map(d => d.id);
+
+  res.json({
+    incidentId: id,
+    incidentStatus: incident.status,
+    flaggedForReview: {
+      memories: flaggedMemories,
+      decisions: flaggedDecisions,
+    },
+    unresolved: {
+      memories: memoryIds.filter(mid =>
+        !memories.some(m => m.id === mid && m.status === 'review_required')
+      ),
+      decisions: decisionIds.filter(did =>
+        !decisions.some(d => d.id === did && d.status === 'review_required')
+      ),
+    },
+  });
+}));
+
 
 app.post('/api/incidents/:id/investigate', asyncRoute(async (req, res) => {
   const { id } = incidentIdParam.parse(req.params);
