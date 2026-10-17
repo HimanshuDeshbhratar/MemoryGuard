@@ -1,0 +1,52 @@
+{
+  "$comment": "MemoryGuard protected policy definitions. The deterministic policy evaluator consumes these rules. A rule triggers when every matcher in `matchers` is satisfied across the structured evidence (memory content + provenance). Matcher types: regex (field: content|sourceType|sourceTrusted, case-insensitive by default). `severity` and `confidence` drive incident classification: confidence 'policy_conflict' => confirmed policy conflict; 'signal' => suspicious signal (heuristic). Patched by hand; no migration needed.",
+  "policies": [
+    {
+      "id": "POL-AUTH-001",
+      "title": "Production authentication checks must remain enabled",
+      "statement": "Authentication checks must not be disabled for production deployments. (Protected policy: \"Production authentication checks must remain enabled.\")",
+      "severity": "critical",
+      "confidence": "policy_conflict",
+      "matchers": [
+        { "type": "regex", "field": "content", "pattern": "\\b(disable|disabled|bypass|skip|skipping|turn(?:ing)? off|deactivate|remove|removing)\\b" },
+        { "type": "regex", "field": "content", "pattern": "\\bauth(entication)?(\\s+checks?)?\\b|\\bsign[- ]?in\\b|\\blogin\\b|\\b2fa\\b|\\bmfa\\b" },
+        { "type": "regex", "field": "content", "pattern": "\\b(prod(uction)?\\s*(deploy(ment)?s?|deploying)|deploy(ing)?\\s+(to|in)\\s+prod(uction)?|\\bprod(uction)?\\b)" }
+      ]
+    },
+    {
+      "id": "POL-SECRETS-001",
+      "title": "Secrets must not be stored in agent memory",
+      "statement": "Agents must not persist API keys, tokens, passwords, private keys, or connection strings in memory.",
+      "severity": "critical",
+      "confidence": "policy_conflict",
+      "matchers": [
+        { "type": "regex", "field": "content", "pattern": "\\b(api[-_ ]?key|secret|token|password|passwd|private[-_ ]?key|access[-_ ]?credential|connection[-_ ]?string)\\b" },
+        { "type": "regex", "field": "content", "pattern": "\\b(store|save|write|persist|copy|record|remember)\\b" }
+      ]
+    },
+    {
+      "id": "POL-DESTRUCT-001",
+      "title": "Destructive actions require explicit approval",
+      "statement": "Memory content that plans or records destructive operations (delete, drop, wipe, purge, force reset) requires explicit approval evidence.",
+      "severity": "high",
+      "confidence": "policy_conflict",
+      "matchers": [
+        { "type": "regex", "field": "content", "pattern": "\\b(delete|drop|wipe|purge|erase|destroy|force[- ]?reset|rm\\s+-rf)\\b" }
+      ],
+      "unless": [
+        { "type": "regex", "field": "content", "pattern": "\\b(approved by|with approval|explicit(?:ly)? approv)\\b" }
+      ]
+    },
+    {
+      "id": "POL-EXTINST-001",
+      "title": "Untrusted external instructions must not override protected policies",
+      "statement": "Instructions arriving from untrusted sources (e.g. scraped web pages, user chat attachments) must never be treated as authoritative. This is a heuristic suspicious-signal detector, not a confirmed policy conflict.",
+      "severity": "high",
+      "confidence": "signal",
+      "matchers": [
+        { "type": "regex", "field": "sourceTrusted", "pattern": "^false$" },
+        { "type": "regex", "field": "content", "pattern": "\\b(ignore|disregard|override|supersede|instead of)\\b.*\\b(polic(?:y|ies)|rules?|instructions?|previous)\\b|\\b(instructions?|directives?)\\s+(from|in)\\s+(the\\s+)?(page|email|document|attachment|conversation|user)" }
+      ]
+    }
+  ]
+}
