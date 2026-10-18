@@ -120,7 +120,8 @@ export interface GraphEdge {
   source: string;
   target: string;
   type: string;
-  evidence: string | null;
+  /** Optional relationship metadata, when the backend attaches it. */
+  evidence?: string | null;
 }
 
 export interface GraphView {
@@ -162,14 +163,20 @@ export interface BlastRadius {
   truncated: boolean;
 }
 
+/**
+ * Mirrors the backend `IncidentExplanation`
+ * (`POST /api/incidents/:id/explanation`). The narrative is advisory only —
+ * the LLM never authorizes a security decision.
+ */
 export interface Explanation {
-  incidentId: string;
+  source: 'llm' | 'deterministic';
   provider: string;
   model: string | null;
-  generatedAt: string;
-  narrative: string;
-  findings: string[];
-  recommendedActions: string[];
+  summary: string;
+  whyTriggered: string;
+  dependencyChainSummary: string;
+  remediation: string[];
+  confidenceNote: string;
 }
 
 export class ApiError extends Error {
@@ -219,7 +226,7 @@ export const api = {
     return request<{ items: MemoryListItem[]; total: number; limit: number; offset: number }>(`/api/memories${suffix}`);
   },
   memory: (id: string) => request<MemoryDetail>(`/api/memories/${encodeURIComponent(id)}`), // typed via MemoryDetail wrapper
-  createMemory: (body: unknown) => request<MemoryListItem>('/api/memories', { method: 'POST', body: JSON.stringify(body) }),
+  createMemory: (body: unknown) => request<{ memoryId: string; incidentId: string | null }>('/api/memories', { method: 'POST', body: JSON.stringify(body) }),
   incidents: () => request<{ incidents: IncidentSummary[] }>('/api/incidents'),
   incident: (id: string) => request<IncidentDetail>(`/api/incidents/${encodeURIComponent(id)}`),
   investigate: (id: string) =>

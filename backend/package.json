@@ -9,7 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "seed": "tsx src/db/seed.ts"
+    "seed": "tsx src/services/seed.ts"
   },
   "dependencies": {
     "falkordb": "^6.8.0",

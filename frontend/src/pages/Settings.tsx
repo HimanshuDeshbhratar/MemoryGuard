@@ -82,8 +82,8 @@ export default function SettingsPage({ onRefresh, dataVersion }: { onRefresh: ()
           {msg && !msg.ok && <ErrorBlock message={msg.text} />}
           {msg && msg.ok && <div className="success-banner">{msg.text}</div>}
           <div className="lib-note">
-            Optional LLM enrichment (settings/backend .env): MEMORYGUARD_LLM_PROVIDER=gemini|groq|openai_apiCompatible,
-            with the provider API key set at runtime. Deterministic investigation works with no key.
+            Optional LLM enrichment (backend <span className="mono">.env</span>): LLM_PROVIDER=none|gemini|groq|openrouter,
+            plus LLM_API_KEY and LLM_MODEL. The narrative is advisory only — deterministic investigation works with no key.
           </div>
         </div>
       </div>

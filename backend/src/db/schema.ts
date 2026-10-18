@@ -2,15 +2,16 @@ import { query } from './falkordb.js';
 import { toJsonProp, parseJsonProp, type IncidentStatus } from '../lib/types.js';
 
 /**
- * Graph schema (documented in docs/GRAPH_SCHEMA.md):
+ * Graph schema (documented in docs/GRAPH.md):
  *   (:Agent)-[:CREATED]->(:Memory)
  *   (:Memory)-[:DERIVED_FROM]->(:Memory)
  *   (:Memory)-[:SUPPORTED_BY]->(:Source)
  *   (:Decision)-[:DEPENDS_ON]->(:Memory)
  *   (:Incident)-[:TARGETS]->(:Memory)
  *   (:Incident)-[:AFFECTS]->(:Decision)
- *   (:Memory)-[:FLAGGED_BY]->(:Incident)   // a memory under review is tied to an incident
- *   (:Decision)-[:FLAGGED_BY]->(:Incident) // a decision under review is tied to an incident
+ *   (:Memory)-[:FLAGGED_BY]->(:Incident)      // a memory under review is tied to an incident
+ *   (:Decision)-[:FLAGGED_BY]->(:Incident)    // a decision under review is tied to an incident
+ *   (:Incident)-[:HAS_EVENT]->(:AuditEvent)   // containment/revalidation audit trail
  * Nodes carry `synthetic: true` and datasets carry `#SYNTHETIC DEMONSTRATION DATA#`
  * markers; nothing in this graph represents a real security incident.
  */
@@ -49,6 +50,12 @@ export const ALLOWED_RELATIONSHIPS = new Set(MEM_REL);
 
 export type Evidence = { kind: string; note: string };
 
+/**
+ * Optional helper for attaching standalone `(:Evidence)` nodes via an
+ * `EVIDENCE` relationship. The current pipeline stores structured evidence as a
+ * JSON property on the `Incident` node instead, so this helper is not wired into
+ * any route and exists only for future graph-native evidence records.
+ */
 export async function attachEvidence(
   incidentId: string,
   evidence: Evidence[],

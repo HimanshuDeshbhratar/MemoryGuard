@@ -263,6 +263,16 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     res.status(err.status).json({ error: 'request_error', message: err.message });
     return;
   }
+  // Body-parser (and similar middleware) attach a `status`/`statusCode` to
+  // client errors such as malformed JSON. Surface them as 4xx, not 500.
+  const clientStatus =
+    typeof err === 'object' && err !== null
+      ? Number((err as { status?: unknown; statusCode?: unknown }).status ?? (err as { statusCode?: unknown }).statusCode)
+      : NaN;
+  if (Number.isInteger(clientStatus) && clientStatus >= 400 && clientStatus < 500) {
+    res.status(clientStatus).json({ error: 'request_error', message: 'malformed request' });
+    return;
+  }
   const message = err instanceof Error ? err.message : 'internal error';
   // No stack traces or credentials are exposed to the client.
   if (process.env.NODE_ENV !== 'test') {

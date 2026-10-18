@@ -54,6 +54,7 @@ MATCH (a)-[r]->(b)
 RETURN labels(a)[0] AS sourceType, a.id AS sourceId,
        labels(b)[0] AS targetType, b.id AS targetId,
        type(r) AS relType
+LIMIT $limit
 `;
 
 const NODE_QUERY = `
@@ -67,6 +68,7 @@ RETURN labels(n)[0] AS type, n.id AS id,
        coalesce(n.role, '') AS role,
        coalesce(n.sourceType, '') AS sourceType,
        n.content AS content
+LIMIT $limit
 `;
 
 const FLAGGED_QUERY = `
@@ -74,13 +76,23 @@ MATCH (x)-[:FLAGGED_BY]->(i:Incident)
 RETURN labels(x)[0] AS type, x.id AS id
 `;
 
+/**
+ * Defensive upper bound for the whole-graph view. The demo dataset is far
+ * smaller; this only guards against unexpectedly large graphs.
+ */
+const GRAPH_LIMIT = 1000;
+
 /** Returns the true graph structure. No edges are invented here. */
-export async function graphView(q: GraphQuery): Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }> {
+export async function graphView(
+  q: GraphQuery,
+): Promise<{ incidentId: string | null; nodes: GraphNode[]; edges: GraphEdge[]; truncated: boolean }> {
   const [nodeRows, edgeRows, flaggedRows] = await Promise.all([
-    roQuery<NodeRow>(NODE_QUERY, {}),
-    roQuery<EdgeRow>(EDGE_QUERY, {}),
+    roQuery<NodeRow>(NODE_QUERY, { limit: GRAPH_LIMIT }),
+    roQuery<EdgeRow>(EDGE_QUERY, { limit: GRAPH_LIMIT }),
     roQuery<{ id: string }>(FLAGGED_QUERY, {}),
   ]);
+
+  const truncated = nodeRows.length >= GRAPH_LIMIT || edgeRows.length >= GRAPH_LIMIT;
 
   const flagged = new Set(flaggedRows.map((r) => r.id));
 
@@ -174,5 +186,5 @@ export async function graphView(q: GraphQuery): Promise<{ nodes: GraphNode[]; ed
   const nodeIds = new Set(nodes.map((n) => n.id));
   edges = edges.filter((e) => nodeIds.has(e.source) && nodeIds.has(e.target));
 
-  return { nodes, edges };
+  return { incidentId: q.incidentId ?? null, nodes, edges, truncated };
 }

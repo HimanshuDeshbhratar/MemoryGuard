@@ -35,7 +35,7 @@ Metrics are computed by live graph queries (`services/metrics.ts`); the activity
 | ------ | ------------------- | ------------------------------------------------------------------------------------------------- |
 | GET    | `/api/memories`     | Query: `search`, `status`, `agentId`, `limit` (1–100, default 50), `offset`. Returns `{ items, total, limit, offset }` |
 | GET    | `/api/memories/:id` | Full record: content, provenance, derived from/derived memories, supporting sources, dependent decisions, incident associations |
-| POST   | `/api/memories`     | Create + run the detection pipeline. Body: `{ content (1–4000), agentId, sourceType: web_scrape\|internal_doc\|runbook\|agent_derivation\|user_chat\|other, sourceRef?, sourceTrusted?, derivedFrom? }` → 201 with the memory record (and incident, if a policy matched) |
+| POST   | `/api/memories`     | Create + run the detection pipeline. Body: `{ content (1–4000), agentId, sourceType: web_scrape\|internal_doc\|runbook\|agent_derivation\|user_chat\|other, sourceRef?, sourceTrusted?, derivedFrom? }` → 201 with `{ memoryId, incidentId }` (`incidentId` is `null` when no policy matched) |
 
 ## Incidents & investigation
 
@@ -46,7 +46,7 @@ Metrics are computed by live graph queries (`services/metrics.ts`); the activity
 | GET    | `/api/incidents/:id/containment-status` | Read-only reconciliation of the incident status with downstream-memory and affected-decision review flags |
 | POST   | `/api/incidents/:id/investigate`  | Runs blast-radius traversal: `{ incident, evidencePaths, impact: { suspectMemoryId, downstreamMemoryIds, affectedDecisionIds, memoryDepth, chains, truncated } }` |
 | POST   | `/api/incidents/:id/quarantine`   | Body `{ "confirmed": true }` required. Quarantines the suspect memory, flags dependents `review_required`, sets the incident `contained`, writes an audit event. Idempotent. |
-| POST   | `/api/incidents/:id/explanation`  | Optional LLM narrative (404-safe; returns deterministic fallback when no provider is configured)  |
+| POST   | `/api/incidents/:id/explanation`  | Optional LLM narrative (404-safe; returns deterministic fallback when no provider is configured). Response: `{ source: 'llm'\|'deterministic', provider, model, summary, whyTriggered, dependencyChainSummary, remediation: string[], confidenceNote }` |
 
 ## Containment revalidation
 

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from 'react';
 import { Play, Lock, Sparkles, GitBranch } from 'lucide-react';
 import {
   api,
-  timeAgo,
   type IncidentDetail as IncidentDetailType,
   type BlastRadius,
   type QuarantineReport,
@@ -278,30 +277,26 @@ export default function IncidentDetail({
             {explanation && (
               <div style={{ marginTop: 12, fontSize: 13 }}>
                 <div className="faint">
-                  provider: {explanation.provider}
-                  {explanation.model ? ` · ${explanation.model}` : ''} · {timeAgo(explanation.generatedAt)}
+                  {explanation.source === 'llm'
+                    ? `LLM narrative (${explanation.provider}${explanation.model ? ` · ${explanation.model}` : ''})`
+                    : 'Deterministic narrative (no LLM configured)'}
                 </div>
-                <p>{explanation.narrative}</p>
-                {explanation.findings.length > 0 && (
-                  <>
-                    <div className="faint">Findings</div>
-                    <ul style={{ margin: '4px 0 8px', paddingLeft: 18 }}>
-                      {explanation.findings.map((f, i) => (
-                        <li key={i}>{f}</li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-                {explanation.recommendedActions.length > 0 && (
+                <p>{explanation.summary}</p>
+                <div className="faint">Why it triggered</div>
+                <p style={{ margin: '4px 0 8px' }}>{explanation.whyTriggered}</p>
+                <div className="faint">Dependency chain</div>
+                <p className="mono" style={{ margin: '4px 0 8px' }}>{explanation.dependencyChainSummary}</p>
+                {explanation.remediation.length > 0 && (
                   <>
                     <div className="faint">Advisory actions (not automatically applied)</div>
-                    <ul style={{ margin: '4px 0', paddingLeft: 18 }}>
-                      {explanation.recommendedActions.map((f, i) => (
+                    <ul style={{ margin: '4px 0 8px', paddingLeft: 18 }}>
+                      {explanation.remediation.map((f, i) => (
                         <li key={i}>{f}</li>
                       ))}
                     </ul>
                   </>
                 )}
+                <div className="faint">{explanation.confidenceNote}</div>
               </div>
             )}
           </div>

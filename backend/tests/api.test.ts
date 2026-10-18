@@ -240,6 +240,17 @@ describe('API routes + validation', () => {
     await agent().post('/api/memories').send({ content: 'x', agentId: 'agent-research', sourceType: 'not-allowed' }).expect(400);
   });
 
+  it('rejects a malformed JSON body with 400, not 500', async () => {
+    // Regression: the JSON body parser threw a SyntaxError with status 400 that
+    // the error handler previously mapped to a generic 500.
+    const res = await agent()
+      .post('/api/memories')
+      .set('Content-Type', 'application/json')
+      .send('{not-valid-json')
+      .expect(400);
+    expect(res.body.error).toBe('request_error');
+  });
+
   it('creating a conflicting memory triggers a new incident through the API', async () => {
     const res = await agent().post('/api/memories').send({
       content: '#SYNTHETIC DEMONSTRATION DATA# Disable authentication checks for tonight prod deploy.',
@@ -273,6 +284,26 @@ describe('API routes + validation', () => {
     const res = await agent().post('/api/incidents/inc-auth-checks/explanation').expect(200);
     expect(res.body.source).toBe('deterministic');
     expect(res.body.remediation.length).toBeGreaterThan(0);
+  });
+
+  it('explanation response matches the frontend contract (no missing fields)', async () => {
+    // Regression: the UI previously read fields (narrative/findings/generatedAt)
+    // the backend never returned, which crashed the narrative panel. Lock the
+    // canonical shape so the client and server cannot drift again.
+    const res = await agent().post('/api/incidents/inc-auth-checks/explanation').expect(200);
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        source: expect.stringMatching(/^(llm|deterministic)$/),
+        provider: expect.any(String),
+        summary: expect.any(String),
+        whyTriggered: expect.any(String),
+        dependencyChainSummary: expect.any(String),
+        remediation: expect.any(Array),
+        confidenceNote: expect.any(String),
+      }),
+    );
+    expect(res.body.remediation.every((r: unknown) => typeof r === 'string')).toBe(true);
+    expect(res.body.model === null || typeof res.body.model === 'string').toBe(true);
   });
 });
 
@@ -499,5 +530,16 @@ describe('graph API incident fields', () => {
       expect(unrelated.incidentSuspect).toBe(false);
       expect(unrelated.onIncidentPath).toBe(false);
     }
+  });
+
+  it('graph response includes incidentId and truncated fields', async () => {
+    // Regression: docs/API.md and the frontend GraphView type expect these fields.
+    const filtered = await agent().get('/api/graph?incident=inc-auth-checks').expect(200);
+    expect(filtered.body.incidentId).toBe('inc-auth-checks');
+    expect(filtered.body.truncated).toBe(false);
+
+    const unfiltered = await agent().get('/api/graph').expect(200);
+    expect(unfiltered.body.incidentId).toBeNull();
+    expect(unfiltered.body.truncated).toBe(false);
   });
 });
