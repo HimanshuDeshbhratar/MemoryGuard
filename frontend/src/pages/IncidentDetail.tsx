@@ -92,6 +92,8 @@ export default function IncidentDetail({
 
   const downstream = investigation?.downstreamMemoryIds.length;
   const affected = investigation?.affectedDecisionIds.length;
+  const exposedMemories = investigation?.exposedMemoryIds.length ?? 0;
+  const exposedDecisions = investigation?.exposedDecisionIds.length ?? 0;
 
   return (
     <div>
@@ -127,7 +129,8 @@ export default function IncidentDetail({
         <div className="success-banner">
           Quarantined: {quarantine.quarantined.length ? quarantine.quarantined.join(', ') : 'none (already contained)'} ·
           flagged for review — memories: {quarantine.flaggedForReview.memories.length}, decisions: {quarantine.flaggedForReview.decisions.length} ·
-          unresolved: {quarantine.unresolved.memories.length + quarantine.unresolved.decisions.length}
+          unresolved: {quarantine.unresolved.memories.length + quarantine.unresolved.decisions.length} ·
+          flagged via observed exposure — memories: {quarantine.exposed.memories.length}, decisions: {quarantine.exposed.decisions.length}
         </div>
       )}
 
@@ -180,14 +183,26 @@ export default function IncidentDetail({
                 <div className="metric-grid" style={{ marginBottom: 14 }}>
                   <div className="metric-card amber">
                     <div className="metric-value">{downstream ?? 0}</div>
-                    <div className="metric-label">Downstream memories reachable</div>
+                    <div className="metric-label">Declared downstream memories</div>
                   </div>
                   <div className="metric-card purple">
                     <div className="metric-value">{affected ?? 0}</div>
-                    <div className="metric-label">Affected decisions</div>
+                    <div className="metric-label">Declared affected decisions</div>
+                  </div>
+                  <div className="metric-card amber">
+                    <div className="metric-value">{exposedMemories}</div>
+                    <div className="metric-label">Exposed memories (unproven)</div>
+                  </div>
+                  <div className="metric-card purple">
+                    <div className="metric-value">{exposedDecisions}</div>
+                    <div className="metric-label">Exposed decisions (unproven)</div>
                   </div>
                 </div>
-                {investigation && investigation.chains.length > 0 && (
+
+                <div className="faint" style={{ marginBottom: 6 }}>
+                  Confirmed lineage (declared <span className="mono">DERIVED_FROM</span> / <span className="mono">DEPENDS_ON</span>):
+                </div>
+                {investigation && investigation.chains.length > 0 ? (
                   <div>
                     <div className="faint" style={{ marginBottom: 6 }}>Influence chains (suspect → … → consumer):</div>
                     {investigation.chains.slice(0, 12).map((c, i) => (
@@ -202,15 +217,55 @@ export default function IncidentDetail({
                     ))}
                     {investigation.truncated && <div className="faint">Traversal truncated at the backend limit.</div>}
                   </div>
+                ) : (
+                  <span className="dim">No declared lineage paths recorded.</span>
                 )}
                 {investigation && investigation.affectedDecisionIds.length > 0 && (
                   <div style={{ marginTop: 10 }}>
-                    <div className="faint" style={{ marginBottom: 6 }}>Affected decisions:</div>
+                    <div className="faint" style={{ marginBottom: 6 }}>Affected decisions (declared):</div>
                     {investigation.affectedDecisionIds.map((d) => (
                       <div key={d}>
                         <span className="mono" style={{ fontSize: 12, color: 'var(--muted)' }}>{d}</span>
                       </div>
                     ))}
+                  </div>
+                )}
+
+                {investigation && (investigation.exposedMemoryIds.length > 0 || investigation.exposedDecisionIds.length > 0) && (
+                  <div style={{ marginTop: 14, borderTop: '1px dashed var(--border)', paddingTop: 10 }}>
+                    <div className="faint" style={{ marginBottom: 6 }}>
+                      Observed exposure (retrieved in a context that produced the record &mdash; potential influence, not proof of causation):
+                    </div>
+                    {investigation.exposedMemoryIds.length > 0 && (
+                      <div style={{ marginBottom: 6 }}>
+                        <div className="faint">Memories written while exposed:</div>
+                        {investigation.exposedMemoryIds.map((m) => (
+                          <div key={m}>
+                            <button className="clickable mono" style={{ fontSize: 12 }} onClick={() => onNav('memories', m)}>{m}</button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {investigation.exposedDecisionIds.length > 0 && (
+                      <div style={{ marginBottom: 6 }}>
+                        <div className="faint">Decisions written while exposed:</div>
+                        {investigation.exposedDecisionIds.map((d) => (
+                          <div key={d}><span className="mono" style={{ fontSize: 12, color: 'var(--muted)' }}>{d}</span></div>
+                        ))}
+                      </div>
+                    )}
+                    {investigation.exposureContextIds.length > 0 && (
+                      <div className="faint">Contexts: <span className="mono">{investigation.exposureContextIds.join(', ')}</span></div>
+                    )}
+                  </div>
+                )}
+
+                {investigation?.provenance && (
+                  <div className="faint" style={{ marginTop: 12, fontSize: 12 }}>
+                    {investigation.provenance.coverageComplete
+                      ? 'Provenance coverage: every memory has recorded provenance.'
+                      : `Provenance coverage: incomplete — ${investigation.provenance.unprovenancedMemories} memory record(s) have no recorded declared lineage or retrieval context.`}{' '}
+                    {investigation.provenance.caveat}
                   </div>
                 )}
               </>

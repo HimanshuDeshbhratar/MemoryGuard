@@ -9,14 +9,78 @@ export interface BlastRadiusMemory {
   depth: number;
   chains: string[][];
 }
+/**
+ * Honest description of what the traversal could and could not establish.
+ * A graph can only traverse relationships that were recorded: absence of a
+ * recorded path is never proof that no influence exists.
+ */
+export interface ProvenanceSummary {
+  /** Number of explicit DERIVED_FROM edges in the graph (confirmed lineage). */
+  declaredRelationshipCount: number;
+  /** Number of observed EXPOSED_TO edges in the graph (potential influence). */
+  exposureRelationshipCount: number;
+  /** Memories in the graph that carry no recorded provenance at all. */
+  unprovenancedMemories: number;
+  /**
+   * True only when every memory has some recorded provenance (declared lineage
+   * or a recorded retrieval context). Otherwise the blast radius may be
+   * incomplete.
+   */
+  coverageComplete: boolean;
+  caveat: string;
+}
 export interface BlastRadius {
   incidentId: string;
   suspectMemoryId: string | null;
+  /** Confirmed recorded lineage: memories with an explicit DERIVED_FROM path to the suspect. */
   downstreamMemoryIds: string[];
+  /** Confirmed recorded lineage: decisions that DEPENDS_ON a memory derived from the suspect. */
   affectedDecisionIds: string[];
+  /**
+   * Observed exposure (unproven): memories written in a retrieval context that
+   * had retrieved the suspect memory (or an already-exposed memory).
+   */
+  exposedMemoryIds: string[];
+  /** Observed exposure (unproven): decisions written in / depending on an exposed record. */
+  exposedDecisionIds: string[];
+  /** Retrieval contexts that contributed exposure paths. */
+  exposureContextIds: string[];
   memoryDepth: Record<string, number>;
   chains: { chain: string[]; decisionId: string | null }[];
   truncated: boolean;
+  /** Completeness / coverage caveats for the blast radius. */
+  provenance: ProvenanceSummary;
+}
+
+const PROVENANCE_CAVEAT =
+  'Blast radius is computed only from recorded relationships. Absence of a path is not evidence of absence of influence: memories absorbed without declared lineage and retrievals never recorded cannot be discovered.';
+
+async function computeProvenanceSummary(): Promise<ProvenanceSummary> {
+  const [declared, exposure, unprovenanced] = await Promise.all([
+    roQuery<{ n: number }>('MATCH ()-[e:DERIVED_FROM]->() RETURN count(e) AS n'),
+    roQuery<{ n: number }>('MATCH ()-[e:EXPOSED_TO]->() RETURN count(e) AS n'),
+    roQuery<{ n: number }>(
+      `MATCH (m:Memory)
+       OPTIONAL MATCH (m)-[:DERIVED_FROM]->(p:Memory)
+       OPTIONAL MATCH (m)<-[:DERIVED_FROM]-(c:Memory)
+       OPTIONAL MATCH (m)-[:CREATED_IN]->(ctx:Context)
+       WITH m, collect(DISTINCT p) AS ps, collect(DISTINCT c) AS cs, collect(DISTINCT ctx) AS ctxs
+       WITH m,
+            [x IN ps WHERE x IS NOT NULL] AS ps2,
+            [x IN cs WHERE x IS NOT NULL] AS cs2,
+            [x IN ctxs WHERE x IS NOT NULL] AS ctxs2
+       WHERE size(ps2) = 0 AND size(cs2) = 0 AND size(ctxs2) = 0
+       RETURN count(m) AS n`,
+    ),
+  ]);
+  const unprovenancedMemories = Number(unprovenanced[0]?.n) || 0;
+  return {
+    declaredRelationshipCount: Number(declared[0]?.n) || 0,
+    exposureRelationshipCount: Number(exposure[0]?.n) || 0,
+    unprovenancedMemories,
+    coverageComplete: unprovenancedMemories === 0,
+    caveat: PROVENANCE_CAVEAT,
+  };
 }
 
 /**
@@ -73,9 +137,19 @@ export async function computeBlastRadius(incidentId?: string, memoryId?: string)
     suspectMemoryId,
     downstreamMemoryIds: [],
     affectedDecisionIds: [],
+    exposedMemoryIds: [],
+    exposedDecisionIds: [],
+    exposureContextIds: [],
     memoryDepth: {},
     chains: [],
     truncated: false,
+    provenance: {
+      declaredRelationshipCount: 0,
+      exposureRelationshipCount: 0,
+      unprovenancedMemories: 0,
+      coverageComplete: false,
+      caveat: PROVENANCE_CAVEAT,
+    },
   };
 
   if (!suspectMemoryId) return result;
@@ -136,6 +210,61 @@ export async function computeBlastRadius(incidentId?: string, memoryId?: string)
       result.chains.push({ chain: row.chain, decisionId: row.decisionId ?? null });
     }
   }
+
+  // 4. Observed exposure (unproven). Records written in a retrieval context that
+  //    had retrieved the suspect memory (or a transitively exposed memory).
+  const exposedMemoryRows = await roQuery<{ memoryId: string; depth: number }>(
+    `MATCH path = (m:Memory)-[:EXPOSED_TO*1..${TRAVERSAL.maxDepth}]->(root:Memory {id:$mid})
+     WHERE m.id <> root.id
+     WITH m, min(length(path)) AS depth
+     ORDER BY depth ASC
+     LIMIT ${TRAVERSAL.maxNodes}
+     RETURN m.id AS memoryId, depth`,
+    { mid: suspectMemoryId },
+  );
+  const exposedSet = new Set<string>();
+  for (const r of exposedMemoryRows) {
+    if (!exposedSet.has(r.memoryId)) {
+      exposedSet.add(r.memoryId);
+      result.exposedMemoryIds.push(r.memoryId);
+    }
+  }
+  if (exposedMemoryRows.length >= maxNodes) result.truncated = true;
+
+  const exposedDecisionRows = await roQuery<{ decisionId: string }>(
+    `MATCH (root:Memory {id:$mid})
+     MATCH (d:Decision)-[:EXPOSED_TO*1..${TRAVERSAL.maxDepth}]->(root)
+     RETURN DISTINCT d.id AS decisionId`,
+    { mid: suspectMemoryId },
+  );
+  const exposedDecisionDepRows = await roQuery<{ decisionId: string }>(
+    `MATCH (root:Memory {id:$mid})
+     MATCH (d:Decision)-[:DEPENDS_ON]->(m:Memory)
+     WHERE m.id = root.id OR (m)-[:EXPOSED_TO*1..${TRAVERSAL.maxDepth}]->(root)
+     RETURN DISTINCT d.id AS decisionId`,
+    { mid: suspectMemoryId },
+  );
+  const exposedDecisionSet = new Set<string>();
+  const declaredDecisionSet = new Set(result.affectedDecisionIds);
+  for (const r of [...exposedDecisionRows, ...exposedDecisionDepRows]) {
+    // Declared-lineage decisions are reported in affectedDecisionIds only, to
+    // keep the two categories independently queryable and non-overlapping.
+    if (!declaredDecisionSet.has(r.decisionId) && !exposedDecisionSet.has(r.decisionId)) {
+      exposedDecisionSet.add(r.decisionId);
+      result.exposedDecisionIds.push(r.decisionId);
+    }
+  }
+
+  const exposureContextRows = await roQuery<{ contextId: string }>(
+    `MATCH (ctx:Context)-[:RETRIEVED]->(m:Memory)
+     WHERE m.id = $mid OR (m)-[:EXPOSED_TO*1..${TRAVERSAL.maxDepth}]->(:Memory {id:$mid})
+     RETURN DISTINCT ctx.id AS contextId ORDER BY ctx.id`,
+    { mid: suspectMemoryId },
+  );
+  result.exposureContextIds = exposureContextRows.map((r) => r.contextId);
+
+  // 5. Honest provenance coverage.
+  result.provenance = await computeProvenanceSummary();
 
   return result;
 }

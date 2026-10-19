@@ -1,5 +1,7 @@
 import { roQuery, query } from '../db/falkordb.js';
 import { newId, nowIso, toJsonProp } from '../lib/types.js';
+import { ValidationError } from '../lib/errors.js';
+import { assertContextOwnership, linkRecordToContext } from './contexts.js';
 import { evaluateNewMemory } from './detection.js';
 
 export interface MemoryRecord {
@@ -70,6 +72,19 @@ export interface MemoryProvenance {
   dependentDecisions: Array<{ id: string; description: string; status: string }>;
   createdAtBy: { id: string; name: string; role: string } | null;
   auditTrail: { id: string; type: string; reason: string; createdAt: string }[];
+  /**
+   * Observed exposure: memories that were recorded as retrieved in a context
+   * this memory was written in. This is potential influence only — it is *not*
+   * declared derivation and does not prove causality.
+   */
+  exposedTo: Array<{ id: string; content: string; status: string; contextId: string }>;
+  /**
+   * Records written in a context that retrieved this memory. These are the
+   * records potentially influenced by this memory through observed exposure.
+   */
+  exposedRecords: Array<{ id: string; label: string; kind: 'memory' | 'decision'; contextId: string }>;
+  /** Retrieval contexts this memory was declared to be written in (empty when unknown). */
+  createdInContexts: string[];
 }
 
 interface RelatedMemory {
@@ -130,7 +145,7 @@ export async function getMemoryWithProvenance(id: string): Promise<MemoryProvena
   // every related record, so the UI renders human-readable lineage from one call.
   const clean = (list: unknown[]): RelatedMemory[] =>
     (list as RelatedMemory[]).filter((x) => x && x.id);
-  const [parents, children, sources, decisions, agents] = await Promise.all([
+  const [parents, children, sources, decisions, agents, exposedTo, exposedMemories, exposedDecisions, contexts] = await Promise.all([
     roQuery<RelatedMemory>(
       `MATCH (m:Memory {id:$id})-[:DERIVED_FROM]->(p:Memory)
        RETURN p.id AS id, p.content AS content, p.status AS status ORDER BY p.createdAt`,
@@ -159,6 +174,33 @@ export async function getMemoryWithProvenance(id: string): Promise<MemoryProvena
       `MATCH (a:Agent)-[:CREATED]->(m:Memory {id:$id}) RETURN a.id AS id, a.name AS name, a.role AS role`,
       { id },
     ),
+    // Observed exposure (unproven): memories this record was exposed to.
+    roQuery<{ id: string; content: string; status: string; contextId: string }>(
+      `MATCH (m:Memory {id:$id})-[e:EXPOSED_TO]->(src:Memory)
+       RETURN src.id AS id, src.content AS content, src.status AS status,
+              coalesce(e.contextId,'') AS contextId
+       ORDER BY src.id`,
+      { id },
+    ),
+    // Records written in a context that retrieved this memory (memories).
+    roQuery<{ id: string; label: string; contextId: string }>(
+      `MATCH (m:Memory {id:$id})<-[:RETRIEVED]-(ctx:Context)<-[:CREATED_IN]-(r:Memory)
+       RETURN DISTINCT r.id AS id, r.content AS label, ctx.id AS contextId
+       ORDER BY r.id`,
+      { id },
+    ),
+    // Records written in a context that retrieved this memory (decisions).
+    roQuery<{ id: string; label: string; contextId: string }>(
+      `MATCH (m:Memory {id:$id})<-[:RETRIEVED]-(ctx:Context)<-[:CREATED_IN]-(r:Decision)
+       RETURN DISTINCT r.id AS id, r.description AS label, ctx.id AS contextId
+       ORDER BY r.id`,
+      { id },
+    ),
+    // Contexts this memory was written in (provenance coverage signal).
+    roQuery<{ id: string }>(
+      `MATCH (m:Memory {id:$id})-[:CREATED_IN]->(ctx:Context) RETURN ctx.id AS id ORDER BY ctx.id`,
+      { id },
+    ),
   ]);
   const agent = agents[0] ?? null;
 
@@ -170,6 +212,12 @@ export async function getMemoryWithProvenance(id: string): Promise<MemoryProvena
     dependentDecisions: decisions.filter((d) => d.id),
     createdAtBy: agent,
     auditTrail: [],
+    exposedTo: exposedTo.filter((e) => e.id),
+    exposedRecords: [
+      ...exposedMemories.filter((e) => e.id).map((e) => ({ id: e.id, label: e.label, kind: 'memory' as const, contextId: e.contextId })),
+      ...exposedDecisions.filter((e) => e.id).map((e) => ({ id: e.id, label: e.label, kind: 'decision' as const, contextId: e.contextId })),
+    ],
+    createdInContexts: contexts.map((c) => c.id),
   };
 }
 
@@ -179,18 +227,59 @@ export interface CreateMemoryInput {
   sourceType: string;
   sourceRef?: string;
   sourceTrusted: boolean;
-  derivedFrom?: string;
+  /**
+   * Declared parent lineage. Accepts a single id (legacy clients) or an array
+   * of ids (multiple parents). Each parent yields one DERIVED_FROM edge.
+   */
+  derivedFrom?: string | string[];
+  /** Retrieval context this memory was written in; records observed exposure. */
+  contextId?: string;
 }
 
-export async function createMemory(input: CreateMemoryInput): Promise<{
+export interface CreateMemoryResult {
   memoryId: string;
   incidentId: string | null;
-}> {
+  /** Parents recorded as explicit DERIVED_FROM lineage (declared, confirmed). */
+  derivedFrom: string[];
+  /** Memories retrieved in `contextId` this record was exposed to (observed, unproven). */
+  exposedTo: string[];
+  contextId: string | null;
+}
+
+export async function createMemory(input: CreateMemoryInput): Promise<CreateMemoryResult> {
   const memoryId = newId('mem');
   const ts = nowIso();
   const sourceId = newId('src');
   const trust = input.sourceTrusted ? 'trusted' : 'untrusted';
   const status = 'trusted'; // status transitions run only through the backend pipeline
+
+  const parentIds = [
+    ...new Set(
+      Array.isArray(input.derivedFrom)
+        ? input.derivedFrom
+        : input.derivedFrom
+          ? [input.derivedFrom]
+          : [],
+    ),
+  ].filter((id) => id !== memoryId);
+
+  const agentRows = await roQuery<{ id: string }>('MATCH (a:Agent {id:$agentId}) RETURN a.id AS id', {
+    agentId: input.agentId,
+  });
+  if (!agentRows.length) throw new ValidationError(`unknown agent: ${input.agentId}`);
+
+  if (parentIds.length > 0) {
+    const rows = await roQuery<{ id: string }>('MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id AS id', {
+      ids: parentIds,
+    });
+    const found = new Set(rows.map((r) => r.id));
+    const missing = parentIds.filter((id) => !found.has(id));
+    if (missing.length > 0) throw new ValidationError(`unknown parent memory id(s): ${missing.join(', ')}`);
+  }
+
+  if (input.contextId) {
+    await assertContextOwnership(input.contextId, input.agentId);
+  }
 
   await query(
     `MATCH (a:Agent {id:$agentId})
@@ -217,13 +306,26 @@ export async function createMemory(input: CreateMemoryInput): Promise<{
     },
   );
 
-  if (input.derivedFrom) {
+  // One DERIVED_FROM edge per declared parent (idempotent via UNWIND + MERGE).
+  if (parentIds.length > 0) {
     await query(
-      `MATCH (child:Memory {id:$cid}), (parent:Memory {id:$pid})
+      `MATCH (child:Memory {id:$cid})
+       UNWIND $parents AS pid
+       MATCH (parent:Memory {id:pid})
        MERGE (child)-[d:DERIVED_FROM]->(parent)
          SET d.evidence=$ev`,
-      { cid: memoryId, pid: input.derivedFrom, ev: toJsonProp([{ kind: 'derivation', note: 'Created referencing parent memory' }]) },
+      {
+        cid: memoryId,
+        parents: parentIds,
+        ev: toJsonProp([{ kind: 'derivation', note: 'Created referencing parent memory' }]),
+      },
     );
+  }
+
+  // Observed exposure: derived server-side from the context's recorded retrievals.
+  let exposedTo: string[] = [];
+  if (input.contextId) {
+    exposedTo = await linkRecordToContext('Memory', memoryId, input.contextId, ts);
   }
 
   const result = await evaluateNewMemory({
@@ -240,7 +342,13 @@ export async function createMemory(input: CreateMemoryInput): Promise<{
     });
   }
 
-  return { memoryId, incidentId: result.incidentId };
+  return {
+    memoryId,
+    incidentId: result.incidentId,
+    derivedFrom: parentIds,
+    exposedTo,
+    contextId: input.contextId ?? null,
+  };
 }
 
 export async function listAgents(): Promise<{ id: string; name: string; role: string; status: string; memoryCount: number }[]> {

@@ -1,13 +1,19 @@
 import { query, roQuery } from '../db/falkordb.js';
 import { computeBlastRadius } from './blastRadius.js';
 import { newId, nowIso, TRAVERSAL } from '../lib/types.js';
+import { NotFoundError } from '../lib/errors.js';
 
 export interface QuarantineReport {
   incidentId: string;
   suspectMemoryId: string | null;
   quarantined: string[];
+  /** Records flagged review_required, whether via confirmed lineage or observed exposure. */
   flaggedForReview: { memories: string[]; decisions: string[] };
   unresolved: { memories: string[]; decisions: string[] };
+  /** Records flagged specifically because of observed (unproven) exposure. */
+  exposed: { memories: string[]; decisions: string[]; contextIds: string[] };
+  /** Coverage caveats: the blast radius is only as complete as the recorded provenance. */
+  provenance: Awaited<ReturnType<typeof computeBlastRadius>>['provenance'];
 }
 
 /**
@@ -42,23 +48,37 @@ export async function quarantine(incidentId: string): Promise<QuarantineReport> 
     { iid: incidentId, eid: `${incidentId}-quarantine`, ts: nowIso(), reason: 'operator confirmed containment' },
   );
 
-  // 3. Mark downstream derived memories review_required (skip already-quarantined ones).
+  // 3. Mark every memory reachable through confirmed lineage OR observed
+  //    exposure review_required (skip already-quarantined/exposed ones).
+  //    Reaching a record twice (declared + exposure, or two paths) still yields
+  //    a single SET and a single collector row, so no duplicate flags.
   const memoryFlagRows = await query<{ memoryIds: string[] }>(
-    `MATCH (root:Memory {id:$mid})<-[:DERIVED_FROM*1..${TRAVERSAL.maxDepth}]-(m:Memory)
-     WHERE m.status IN ['trusted','suspicious']
+    `MATCH (root:Memory {id:$mid})
+     MATCH (m:Memory)
+     WHERE m.id <> root.id
+       AND m.status IN ['trusted','suspicious']
+       AND ((m)-[:DERIVED_FROM*1..${TRAVERSAL.maxDepth}]->(root)
+            OR (m)-[:EXPOSED_TO*1..${TRAVERSAL.maxDepth}]->(root))
      SET m.status='review_required', m.updatedAt=$ts
      RETURN collect(DISTINCT m.id) AS memoryIds`,
     { mid: memoryId, ts: nowIso() },
   );
   const flaggedMemories = memoryFlagRows[0]?.memoryIds ?? [];
 
-  // 4. Flag affected decisions for review.
+  // 4. Flag affected decisions for review. A decision is affected when it
+  //    depends on (or is exposed to) a record reachable through either lineage.
   const decisionFlagRows = await query<{ decisionIds: string[] }>(
-    `MATCH (i:Incident {id:$iid})-[:AFFECTS]->(d:Decision)
+    `MATCH (root:Memory {id:$mid})
+     MATCH (d:Decision)
      WHERE d.status IN ['active','revalidated']
+       AND (
+         (d)-[:DEPENDS_ON]->(:Memory)-[:DERIVED_FROM*0..${TRAVERSAL.maxDepth}]->(root)
+         OR (d)-[:DEPENDS_ON]->(:Memory)-[:EXPOSED_TO*0..${TRAVERSAL.maxDepth}]->(root)
+         OR (d)-[:EXPOSED_TO*1..${TRAVERSAL.maxDepth}]->(root)
+       )
      SET d.status='review_required', d.updatedAt=$ts
      RETURN collect(DISTINCT d.id) AS decisionIds`,
-    { iid: incidentId, ts: nowIso() },
+    { mid: memoryId, ts: nowIso() },
   );
   const flaggedDecisions = decisionFlagRows[0]?.decisionIds ?? [];
 
@@ -82,6 +102,8 @@ export async function quarantine(incidentId: string): Promise<QuarantineReport> 
 
   // 5. Re-run impact analysis for the report.
   const blast = await computeBlastRadius(incidentId);
+  const allMemoryIds = [...new Set([...blast.downstreamMemoryIds, ...blast.exposedMemoryIds])];
+  const allDecisionIds = [...new Set([...blast.affectedDecisionIds, ...blast.exposedDecisionIds])];
   // Report the persisted containment state, not merely the rows transitioned by
   // this invocation. This keeps repeated quarantine reports idempotent.
   const [currentMemories, currentDecisions] = await Promise.all([
@@ -89,13 +111,13 @@ export async function quarantine(incidentId: string): Promise<QuarantineReport> 
       `MATCH (m:Memory)
        WHERE m.id IN $ids
        RETURN m.id AS id, m.status AS status`,
-      { ids: blast.downstreamMemoryIds },
+      { ids: allMemoryIds },
     ),
     roQuery<{ id: string; status: string }>(
       `MATCH (d:Decision)
        WHERE d.id IN $ids
        RETURN d.id AS id, d.status AS status`,
-      { ids: blast.affectedDecisionIds },
+      { ids: allDecisionIds },
     ),
   ]);
   const reviewMemories = currentMemories.filter((memory) => memory.status === 'review_required').map((memory) => memory.id);
@@ -106,9 +128,15 @@ export async function quarantine(incidentId: string): Promise<QuarantineReport> 
     quarantined: [memoryId],
     flaggedForReview: { memories: reviewMemories, decisions: reviewDecisions },
     unresolved: {
-      memories: blast.downstreamMemoryIds.filter((id) => !reviewMemories.includes(id)),
-      decisions: blast.affectedDecisionIds.filter((id) => !reviewDecisions.includes(id)),
+      memories: allMemoryIds.filter((id) => !reviewMemories.includes(id)),
+      decisions: allDecisionIds.filter((id) => !reviewDecisions.includes(id)),
     },
+    exposed: {
+      memories: blast.exposedMemoryIds,
+      decisions: blast.exposedDecisionIds,
+      contextIds: blast.exposureContextIds,
+    },
+    provenance: blast.provenance,
   };
 }
 
@@ -210,16 +238,20 @@ export async function revalidateDecision(
   actor = 'operator',
 ): Promise<{ ok: true; decisionId: string } | { ok: false; blockedBy: string[] }> {
   // Expand: follow DEPENDS_ON to every direct memory dependency, then follow
-  // DERIVED_FROM ancestry up to maxDepth hops from each dependency.
-  // Block if any memory in that full set has a non-safe status.
+  // DERIVED_FROM ancestry up to maxDepth hops from each dependency. Separately
+  // follow observed exposure (EXPOSED_TO) from the decision itself. Block if any
+  // memory in that full set has a non-safe status.
   const rows = await roQuery<{ status: string; blocked: (string | null)[] }>(
     `MATCH (d:Decision {id:$did})
      OPTIONAL MATCH (d)-[:DEPENDS_ON]->(m:Memory)
      OPTIONAL MATCH (m)-[:DERIVED_FROM*0..${TRAVERSAL.maxDepth}]->(ancestor:Memory)
      WITH d,
-          collect(DISTINCT CASE WHEN ancestor.status IN ['quarantined','review_required'] THEN ancestor.id END) AS blocked
+          collect(DISTINCT CASE WHEN ancestor.status IN ['quarantined','review_required'] THEN ancestor.id END) AS depBlocked
+     OPTIONAL MATCH (d)-[:EXPOSED_TO*0..${TRAVERSAL.maxDepth}]->(exposed:Memory)
+     WITH d, depBlocked,
+          collect(DISTINCT CASE WHEN exposed.status IN ['quarantined','review_required'] THEN exposed.id END) AS expBlocked
      RETURN d.status AS status,
-            [x IN blocked WHERE x IS NOT NULL] AS blocked`,
+            [x IN depBlocked + expBlocked WHERE x IS NOT NULL] AS blocked`,
     { did: decisionId },
   );
   if (!rows.length) throw new NotFoundError(`decision ${decisionId} not found`);
@@ -259,4 +291,5 @@ export async function listIncidentAudit(incidentId: string) {
   );
 }
 
-export class NotFoundError extends Error {}
+// NotFoundError now lives in lib/errors.ts; re-exported here for existing importers.
+export { NotFoundError };

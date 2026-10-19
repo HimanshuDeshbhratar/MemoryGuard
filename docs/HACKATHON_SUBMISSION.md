@@ -178,8 +178,8 @@ local instance so they match the current UI:
       *(verify the latest commit is on `origin/main` before submitting)*
 - [x] `README.md` with pitch, architecture, schema, setup, walkthrough, verified results.
 - [x] `docs/GRAPH.md` (graph model + Cypher) and `docs/API.md` (REST reference).
-- [x] Backend tests green (49 passed) and frontend build green (see README §11).
-- [x] Policy benchmark reproduces `TP=9 FP=0 FN=0 TN=7` on the small synthetic corpus.
+- [x] Backend tests green (68 passed) and frontend build green (see README §11).
+- [x] Policy benchmark reproduces `TP=10 FP=0 FN=0 TN=7` on the small synthetic corpus.
 - [x] `.github/workflows/ci.yml` added (backend typecheck/tests/benchmark + frontend build).
 - [ ] **Record and upload the 2–3 minute demo video; paste the URL here: _pending_.**
 - [ ] **Publish the blog post (optional); paste the URL here: _pending_.**

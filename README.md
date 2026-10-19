@@ -23,10 +23,11 @@ MemoryGuard treats memory integrity as a **graph provenance** problem instead of
 ## 3. Key features & end-to-end workflow
 
 1. **Detect** — a deterministic policy engine (`backend/src/policies/`) evaluates every new memory against structured matchers (content text, source type, source trust), plus `unless` guards that suppress false positives. A confirmed match persists an `Incident` with structured evidence — never just a keyword hit.
-2. **Trace (blast radius)** — bounded graph traversal finds memories reachable from the suspect (`DERIVED_FROM*`), then decisions that transitively `DEPENDS_ON` the tainted memory. Unrelated memories are excluded because the traversal is the only source of edges.
-3. **Contain** — an **operator-confirmed** quarantine (never automatic) marks the suspect memory `quarantined`, flags dependent memories and decisions `review_required`, links them with `FLAGGED_BY`, sets the incident `contained`, and writes an `AuditEvent`.
-4. **Close the loop** — revalidation is **gated**: a decision cannot be revalidated while any dependency (direct `DEPENDS_ON` or any transitive `DERIVED_FROM` ancestor) is quarantined or under review → the backend answers **HTTP 409**. The quarantined root needs the explicit `?root=true` path.
-5. **Explain (optional)** — a hosted-LLM adapter can produce a narrative, but **the LLM never authorizes a security decision**. Classification and containment are deterministic; with no key configured the deterministic explanation is returned.
+2. **Trace (blast radius)** — bounded graph traversal finds memories reachable from the suspect through **confirmed declared lineage** (`DERIVED_FROM*`) and **observed exposure** (`EXPOSED_TO`: a record written in a retrieval context that had read the suspect), then the decisions that depend on either. Unrelated memories are excluded because the traversal is the only source of edges. The result reports the two categories separately and states that coverage is only as complete as the recorded provenance.
+3. **Record exposure** — `POST /api/retrievals` records what an agent *actually* retrieved into a context (`(:Context)-[:RETRIEVED]->(:Memory)`, owned by exactly one agent). A memory or decision written with that `contextId` is linked to the context and exposed to exactly the memories recorded as retrieved — derived server-side, so a caller cannot manufacture exposure by naming ids in a write request.
+4. **Contain** — an **operator-confirmed** quarantine (never automatic) marks the suspect memory `quarantined`, flags dependent memories and decisions `review_required` (through declared lineage *or* observed exposure), links them with `FLAGGED_BY`, sets the incident `contained`, and writes an `AuditEvent`.
+5. **Close the loop** — revalidation is **gated**: a decision cannot be revalidated while any dependency (direct `DEPENDS_ON`, transitive `DERIVED_FROM` ancestor, or an exposed memory) is quarantined or under review → the backend answers **HTTP 409**. The quarantined root needs the explicit `?root=true` path.
+6. **Explain (optional)** — a hosted-LLM adapter can produce a narrative, but **the LLM never authorizes a security decision**. Classification and containment are deterministic; with no key configured the deterministic explanation is returned.
 
 The whole pipeline is reproducible against a live FalkorDB instance with the synthetic `inc-auth-checks` dataset (see §7).
 
@@ -65,6 +66,7 @@ Named graph `MEMORYGUARD`. Node labels and key properties:
 | `Decision`  | `id`, `description`, `status`, `createdAt`, `lastValidatedAt`, `revalidationReason`, `synthetic` |
 | `Incident`  | `id`, `title`, `severity`, `confidence`, `reason`, `status`, `createdAt`, `containedAt`, `policyId`, `evidence` (JSON), `synthetic` |
 | `AuditEvent`| `id`, `type`, `actor`, `createdAt`, `reason` |
+| `Context`   | `id`, `agentId`, `createdAt`, `correlationId`, `synthetic` |
 
 Statuses: memory `trusted / suspicious / quarantined / review_required`; decision `active / review_required / revalidated / revoked`; incident `open / investigating / contained / resolved`.
 
@@ -73,7 +75,7 @@ Relationship directions are fixed (edge property `evidence` is JSON where presen
 ```
 (:Agent)-[:CREATED]->(:Memory)
 (:Agent)-[:CREATED]->(:Decision)
-(:Memory)-[:DERIVED_FROM]->(:Memory)        // child → parent
+(:Memory)-[:DERIVED_FROM]->(:Memory)        // child → parent (declared, confirmed lineage)
 (:Memory)-[:SUPPORTED_BY]->(:Source)
 (:Decision)-[:DEPENDS_ON]->(:Memory)
 (:Incident)-[:TARGETS]->(:Memory)
@@ -81,7 +83,17 @@ Relationship directions are fixed (edge property `evidence` is JSON where presen
 (:Memory)-[:FLAGGED_BY]->(:Incident)        // set on quarantine/review
 (:Decision)-[:FLAGGED_BY]->(:Incident)
 (:Incident)-[:HAS_EVENT]->(:AuditEvent)     // quarantine / revalidation trail
+
+# Retrieval context (observed exposure — potential influence, never declared lineage)
+(:Agent)-[:OPENED]->(:Context)              // a context is owned by exactly one agent
+(:Context)-[:RETRIEVED]->(:Memory)          // what an agent actually retrieved into the context
+(:Memory)-[:CREATED_IN]->(:Context)         // where a record was written
+(:Decision)-[:CREATED_IN]->(:Context)
+(:Memory)-[:EXPOSED_TO]->(:Memory)          // server-derived from RETRIEVED; carries contextId
+(:Decision)-[:EXPOSED_TO]->(:Memory)
 ```
+
+`DERIVED_FROM` is **declared** lineage (the writer asserted it). `EXPOSED_TO` is **observed** exposure (the record was written in a context that had retrieved the memory, so it *may* have been influenced). The two are stored as different relationships and always reported separately — exposure is never presented as proof of derivation.
 
 All writes use stable `id` properties and idempotent `MERGE`, so repeated seeds never duplicate nodes. Quarantine and revalidation states are ordinary graph properties and survive restarts.
 
@@ -93,9 +105,11 @@ Traversal limits: `TRAVERSAL = { maxDepth: 6, maxNodes: 200 }` (`backend/src/lib
 
 - **Downstream memories** — bounded `DERIVED_FROM*1..6` expansion from the suspect, with `min(length(path))` for hop depth and a node cap that reports truncation.
 - **Affected decisions** — `(d:Decision)-[:DEPENDS_ON]->(m:Memory)` where `m` is the root **or** transitively derives from it (`(m)-[:DERIVED_FROM*1..6]->(root)`).
+- **Observed exposure** — `(m:Memory)-[:EXPOSED_TO*1..6]->(root)` finds records written in a retrieval context downstream of the suspect; a decision that `DEPENDS_ON` such a record (or was itself written while exposed) is exposed too. Reported separately from declared lineage.
 - **Influence chains** — `(root)<-[:DERIVED_FROM*0..6]-(:Memory)<-[:DEPENDS_ON]-(d:Decision)`, returning `[x IN nodes(path) | x.id]` so the UI renders real chains.
-- **Quarantine** — status `SET`s plus `FLAGGED_BY` `MERGE`s; audit events use `MERGE (e:AuditEvent {id: ...})` keyed by incident, making retries idempotent.
-- **Gated revalidation** — a decision is blocked while any memory in its `DEPENDS_ON` + `DERIVED_FROM*0..6` closure is `quarantined` or `review_required`.
+- **Quarantine** — status `SET`s plus `FLAGGED_BY` `MERGE`s; a memory is flagged when it is reachable through **either** `DERIVED_FROM*` **or** `EXPOSED_TO*`, and audit events use `MERGE (e:AuditEvent {id: ...})` keyed by incident, making retries idempotent.
+- **Gated revalidation** — a decision is blocked while any memory in its `DEPENDS_ON` + `DERIVED_FROM*0..6` closure **or** its `EXPOSED_TO*` closure is `quarantined` or `review_required`.
+- **Provenance coverage** — the blast radius counts memories that have neither recorded declared lineage nor a recorded retrieval context and reports `provenance.coverageComplete = false` when any exist, with an explicit caveat that absence of a recorded path is not proof of absence of influence.
 
 Full, copy-accurate Cypher, index definitions, idempotency notes, and traversal boundaries: **[`docs/GRAPH.md`](docs/GRAPH.md)**. REST surfaces: [`docs/API.md`](docs/API.md).
 
@@ -167,7 +181,7 @@ Seeded scenario: `mem-suspicious-root` (untrusted, `suspicious`) is derived into
 
 1. **Overview** — live metrics (memories by status, open incidents, affected decisions) and an activity timeline derived from persisted graph facts.
 2. **Incidents → inc-auth-checks** — suspect memory, detection reason, and structured evidence.
-3. **Run investigation** → influence chain `mem-suspicious-root → mem-derived-plan → dec-deploy`; **1** downstream memory, **1** affected decision.
+3. **Run investigation** → influence chain `mem-suspicious-root → mem-derived-plan → dec-deploy`; **1** downstream memory, **1** affected decision. The panel separates *confirmed lineage* from *observed exposure* and states whether provenance coverage is complete (see §9.1).
 4. **Quarantine suspect** (confirm the dialog) → root becomes `quarantined`, `mem-derived-plan` and `dec-deploy` become `review_required`, incident becomes `contained`. Refresh or restart the backend — state holds.
 5. **Revalidate** `dec-deploy` → **409** until the quarantined dependency is cleared. The root needs `?root=true` with a documented reason.
 6. **Memory Graph** — renders stored relationships only (never invents edges); filter by node type, trust state, or agent.
@@ -207,6 +221,38 @@ curl -s -X POST $BASE/api/decisions/dec-deploy/revalidate \
 curl -s -X POST $BASE/api/incidents/inc-auth-checks/explanation | jq
 ```
 
+### 9.1 Exposure scenario — an uncited derived plan
+
+This mirrors the failure mode where an agent reads a suspicious memory and writes a plan **without declaring it as a parent**. The plan has no `DERIVED_FROM` edge, but because the write happened inside the context that retrieved the suspect memory, MemoryGuard records observed exposure and still flags it during quarantine.
+
+```bash
+# 1. the planning agent retrieves the suspicious root into ctx-1
+curl -s -X POST $BASE/api/retrievals -H 'Content-Type: application/json' \
+  -d '{"contextId":"ctx-1","agentId":"agent-planning","memoryIds":["mem-suspicious-root"]}' | jq
+
+# 2. it writes a plan in ctx-1 WITHOUT declaring derivedFrom
+PLAN=$(curl -s -X POST $BASE/api/memories -H 'Content-Type: application/json' \
+  -d '{"content":"Prepare the deployment plan for release-2026-11.","agentId":"agent-planning","sourceType":"agent_derivation","contextId":"ctx-1"}')
+echo "$PLAN" | jq '{memoryId, derivedFrom, exposedTo}'   # derivedFrom: [], exposedTo: ["mem-suspicious-root"]
+PLAN_ID=$(echo "$PLAN" | jq -r .memoryId)
+
+# 3. a decision depends on the plan (no declared link to the root)
+DEC=$(curl -s -X POST $BASE/api/decisions -H 'Content-Type: application/json' \
+  -d "{\"description\":\"Execute the release-2026-11 plan.\",\"agentId\":\"agent-deploy\",\"dependsOn\":[\"$PLAN_ID\"]}")
+DEC_ID=$(echo "$DEC" | jq -r .decisionId)
+
+# 4. investigation reports the plan/decision under observed exposure, not declared lineage
+curl -s -X POST $BASE/api/incidents/inc-auth-checks/investigate \
+  | jq '.impact | {downstreamMemoryIds, exposedMemoryIds, exposedDecisionIds, exposureContextIds, provenance}'
+
+# 5. quarantine flags them for review through the exposure path, root stays quarantined
+curl -s -X POST $BASE/api/incidents/inc-auth-checks/quarantine \
+  -H 'Content-Type: application/json' -d '{"confirmed":true}' \
+  | jq '{flaggedForReview, exposed, provenance}'
+```
+
+`POST /api/demo/reset` (with confirmation) restores the documented state afterwards.
+
 ## 10. Test, typecheck, build & benchmark
 
 ```bash
@@ -236,12 +282,12 @@ Reproduced on 2026-10-18 against a local FalkorDB (`docker compose`) — Node v2
 | Check | Command | Result |
 | ----- | ------- | ------ |
 | Backend typecheck | `npm run typecheck` (backend) | ✅ pass |
-| Backend tests | `npm test` (backend) | ✅ **49 passed** (10 policy + 39 API), 2 files |
-| Policy benchmark | `npx tsx benchmark/run.ts` | ✅ **TP=9 FP=0 FN=0 TN=7**, precision 100%, recall 100% |
+| Backend tests | `npm test` (backend) | ✅ **68 passed** (10 policy + 39 API + 19 provenance), 3 files |
+| Policy benchmark | `npx tsx benchmark/run.ts` | ✅ **TP=10 FP=0 FN=0 TN=7**, precision 100%, recall 100%, exit 0 |
 | Frontend typecheck | `npm run typecheck` (frontend) | ✅ pass |
-| Frontend build | `npm run build` (frontend) | ✅ pass (≈360 kB JS / 26 kB CSS) |
+| Frontend build | `npm run build` (frontend) | ✅ pass (≈365 kB JS / 26 kB CSS) |
 
-**These numbers are deliberately narrow.** The benchmark is a **16-entry, hand-labeled synthetic corpus** scored by the deterministic regex/matcher engine. `TP=9 FP=0 FN=0 TN=7` describes *that corpus only* and is **not** evidence of production detection accuracy, real-world precision, or coverage. Two corpus entries are marked `provenanceDependent` and cannot be classified correctly by text alone — they require graph lineage, which is evaluated separately by the traversal layer.
+**These numbers are deliberately narrow.** The benchmark is a **17-entry, hand-labeled synthetic corpus** scored by the deterministic regex/matcher engine. `TP=10 FP=0 FN=0 TN=7` describes *that corpus only* and is **not** evidence of production detection accuracy, real-world precision, or coverage. Two corpus entries are marked `provenanceDependent` and cannot be classified correctly by text alone — they require graph lineage, which is evaluated separately by the traversal layer (and the new `provenance.test.ts` suite).
 
 Re-run these commands yourself and compare — nothing here is a projected or estimated figure.
 
@@ -250,6 +296,7 @@ Re-run these commands yourself and compare — nothing here is a projected or es
 Security properties:
 
 - Zod validation on query, params, and body payloads; 64 KB JSON body cap; malformed JSON returns `400`, not `500`.
+- Retrieval and decision writes validate that the agent, every referenced memory id, and the `contextId` exist; writing into or reading another agent's context returns `403` and exposure is always derived server-side from recorded `RETRIEVED` edges, never from request-supplied ids.
 - **Parameterized Cypher everywhere**; user input is never interpolated into a query; the only interpolated identifiers come from fixed literals, and traversal depth is a constant.
 - The frontend cannot supply trust scores or drive status transitions; allowed transitions are enforced server-side.
 - Demo reset requires `ALLOW_DEMO_RESET`, the literal phrase `reset-demo`, and `acknowledgeSynthetic: true`; **arbitrary Cypher is never accepted** by the API.
@@ -262,6 +309,9 @@ Known limitations:
 
 - Policy detection is deterministic pattern matching; it is intentionally conservative and does not generalize to arbitrary novel phrasing.
 - Blast-radius traversal is bounded (max depth 6, max 200 nodes) and reports truncation rather than expanding without limit.
+- **Provenance is only as complete as what was recorded.** A memory absorbed without declared lineage and without a recorded retrieval context cannot be discovered by any traversal. When such records exist the blast radius reports `provenance.coverageComplete = false`; absence of a recorded path is **not** proof of absence of influence.
+- **`EXPOSED_TO` is observed exposure, not causal proof.** It records that a memory was retrieved in a context that produced a record; it does not establish that the record's content was actually influenced. Exposed records are flagged for *review*, never marked definitively malicious.
+- **Context ids are caller-supplied** and bound to the first agent that uses them; reusing an id for an unrelated task within the same agent is the caller's responsibility. Cross-agent reuse is rejected with HTTP 403.
 - The installed FalkorDB JavaScript client exposes graph queries but no transaction API. Writes are therefore idempotent `MERGE`/`SET` operations designed to be safely retried; each revalidation writes its status and audit event in a single Cypher query.
 - `MEMORYGUARD` is a single named graph; there is no multi-tenant isolation.
 - The optional LLM narrative is advisory and disabled by default; it is never consulted for classification or containment.
@@ -277,8 +327,8 @@ backend/
   src/db/schema.ts           indexes + status guards
   src/policies/              policies.json + deterministic evaluator
   src/services/              detection, blastRadius, containment, seed, metrics,
-                             graphView, memories, incidents, llm, demo
-  tests/                     Vitest + Supertest (api.test.ts, policy.test.ts)
+                             graphView, memories, incidents, contexts, decisions, llm, demo
+  tests/                     Vitest + Supertest (api.test.ts, provenance.test.ts, policy.test.ts)
   benchmark/                 synthetic corpus + runner
 frontend/
   src/lib/api.ts             typed API client
@@ -294,7 +344,7 @@ docker-compose.yml           FalkorDB service (localhost only)
 
 ## 14. AI-assisted development disclosure
 
-This project was developed with an AI coding agent (**Codebuff**) and human direction: code, tests, and documentation were generated and iterated against a **live FalkorDB instance**, then reviewed by a human for scope and stack requirements. The project was subsequently audited and polished with further AI assistance (a frontend/backend contract bug, an error-mapping bug, and a broken `npm run seed` script were fixed; regression tests were added), with all verification commands re-run and the results recorded in §11. AI assistance was used for implementation, testing, and documentation — final responsibility for the code and its claims rests with the repository author.
+This project was developed with an AI coding agent (**Codebuff**) and human direction: code, tests, and documentation were generated and iterated against a **live FalkorDB instance**, then reviewed by a human for scope and stack requirements. The project was subsequently audited and polished with further AI assistance (a frontend/backend contract bug, an error-mapping bug, and a broken `npm run seed` script were fixed; regression tests were added), with all verification commands re-run and the results recorded in §11. A later pass added retrieval-context **exposure** tracking — multi-parent `derivedFrom`, `POST /api/retrievals`, `POST /api/decisions`, and exposure-aware blast radius/quarantine/provenance — with its own regression suite (`backend/tests/provenance.test.ts`). AI assistance was used for implementation, testing, and documentation — final responsibility for the code and its claims rests with the repository author.
 
 ## 15. License / status
 

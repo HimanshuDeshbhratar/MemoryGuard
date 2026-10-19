@@ -10,9 +10,11 @@ import { listAgents, createMemory, getMemoryWithProvenance, listMemories } from 
 import { getIncident, getIncidentEvidencePaths, listIncidents } from './services/incidents.js';
 import { computeBlastRadius } from './services/blastRadius.js';
 import { quarantine, revalidateDecision, revalidateMemory, revalidateQuarantinedRoot } from './services/containment.js';
+import { getContext, recordRetrieval } from './services/contexts.js';
+import { createDecision } from './services/decisions.js';
 import { explainIncident } from './services/llm.js';
 import { demo } from './routes/demo.js';
-import { NotFoundError } from './services/containment.js';
+import { NotFoundError, ForbiddenError, ValidationError } from './lib/errors.js';
 
 const app = express();
 app.set('trust proxy', false);
@@ -75,7 +77,24 @@ const createMemorySchema = z.object({
   sourceType: z.enum(['web_scrape', 'internal_doc', 'runbook', 'agent_derivation', 'user_chat', 'other']),
   sourceRef: z.string().max(300).optional(),
   sourceTrusted: z.boolean().default(false),
-  derivedFrom: z.string().min(1).max(80).optional(),
+  // Multi-parent lineage: a single id (legacy) or up to 20 parent ids.
+  derivedFrom: z.union([z.string().min(1).max(80), z.array(z.string().min(1).max(80)).max(20)]).optional(),
+  // Optional retrieval context this memory was written in (records observed exposure).
+  contextId: z.string().min(1).max(80).optional(),
+});
+
+const createDecisionSchema = z.object({
+  description: z.string().min(1).max(500),
+  agentId: z.string().min(1).max(80),
+  dependsOn: z.array(z.string().min(1).max(80)).max(50).optional(),
+  contextId: z.string().min(1).max(80).optional(),
+});
+
+const recordRetrievalSchema = z.object({
+  contextId: z.string().min(1).max(80),
+  agentId: z.string().min(1).max(80),
+  memoryIds: z.array(z.string().min(1).max(80)).min(1).max(50),
+  correlationId: z.string().min(1).max(120).optional(),
 });
 
 const memoriesQuerySchema = z.object({
@@ -105,6 +124,27 @@ app.post('/api/memories', asyncRoute(async (req, res) => {
   res.status(201).json(result);
 }));
 
+// ------------------------------------------------ retrieval contexts (exposure)
+app.post('/api/retrievals', asyncRoute(async (req, res) => {
+  const input = recordRetrievalSchema.parse(req.body);
+  const result = await recordRetrieval(input);
+  res.status(201).json(result);
+}));
+
+app.get('/api/contexts/:id', asyncRoute(async (req, res) => {
+  const { id } = incidentIdParam.parse(req.params);
+  const agentId = z.string().min(1).max(80).parse(req.query.agentId);
+  const context = await getContext(id, agentId);
+  res.json(context);
+}));
+
+// ------------------------------------------------ decisions (output records)
+app.post('/api/decisions', asyncRoute(async (req, res) => {
+  const input = createDecisionSchema.parse(req.body);
+  const result = await createDecision(input);
+  res.status(201).json(result);
+}));
+
 // ---------------------------------------------------------------- incidents
 app.get('/api/incidents', asyncRoute(async (_req, res) => {
   res.json({ incidents: await listIncidents() });
@@ -128,8 +168,8 @@ app.get('/api/incidents/:id/containment-status', asyncRoute(async (req, res) => 
 
   const impact = await computeBlastRadius(id);
 
-  const memoryIds = impact.downstreamMemoryIds;
-  const decisionIds = impact.affectedDecisionIds;
+  const memoryIds = [...new Set([...impact.downstreamMemoryIds, ...impact.exposedMemoryIds])];
+  const decisionIds = [...new Set([...impact.affectedDecisionIds, ...impact.exposedDecisionIds])];
 
   const [memories, decisions] = await Promise.all([
     roQuery<{ id: string; status: string }>(
@@ -169,6 +209,17 @@ app.get('/api/incidents/:id/containment-status', asyncRoute(async (req, res) => 
         !decisions.some(d => d.id === did && d.status === 'review_required')
       ),
     },
+    // Distinguish confirmed lineage from observed exposure, and state coverage limits.
+    lineage: {
+      memories: impact.downstreamMemoryIds,
+      decisions: impact.affectedDecisionIds,
+    },
+    exposure: {
+      memories: impact.exposedMemoryIds,
+      decisions: impact.exposedDecisionIds,
+      contextIds: impact.exposureContextIds,
+    },
+    provenance: impact.provenance,
   });
 }));
 
@@ -253,6 +304,14 @@ app.use((_req: Request, res: Response) => {
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   if (err instanceof ZodError) {
     res.status(400).json({ error: 'validation_error', issues: err.issues });
+    return;
+  }
+  if (err instanceof ValidationError) {
+    res.status(400).json({ error: 'validation_error', message: err.message });
+    return;
+  }
+  if (err instanceof ForbiddenError) {
+    res.status(403).json({ error: 'forbidden', message: err.message });
     return;
   }
   if (err instanceof NotFoundError) {

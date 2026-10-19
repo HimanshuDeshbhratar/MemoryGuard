@@ -117,6 +117,18 @@ export async function graphView(
         { mid: r.mid },
       );
       for (const d of decisions) pathMembers.add(d.did);
+      // Observed-exposure downstream: records written in a context that retrieved
+      // the suspect (or a transitively exposed memory). Highlight only.
+      const exposedMemories = await roQuery<{ mid: string }>(
+        `MATCH (x:Memory)-[:EXPOSED_TO*1..6]->(:Memory {id:$mid}) RETURN DISTINCT x.id AS mid`,
+        { mid: r.mid },
+      );
+      for (const d of exposedMemories) pathMembers.add(d.mid);
+      const exposedDecisions = await roQuery<{ did: string }>(
+        `MATCH (d:Decision)-[:EXPOSED_TO*1..6]->(:Memory {id:$mid}) RETURN DISTINCT d.id AS did`,
+        { mid: r.mid },
+      );
+      for (const d of exposedDecisions) pathMembers.add(d.did);
     }
   }
 
@@ -128,6 +140,7 @@ export async function graphView(
           OR (m)-[:DERIVED_FROM*1..6]->(:Memory)<-[:TARGETS]-(:Incident {id:$iid})
           OR (m)<-[:DERIVED_FROM*1..6]-(:Memory)<-[:TARGETS]-(:Incident {id:$iid})
           OR (m)<-[:DEPENDS_ON]-(:Decision)<-[:AFFECTS]-(:Incident {id:$iid})
+          OR (m)-[:EXPOSED_TO*1..6]->(:Memory)<-[:TARGETS]-(:Incident {id:$iid})
        RETURN DISTINCT a.id AS aid`,
       { iid: q.incidentId },
     );

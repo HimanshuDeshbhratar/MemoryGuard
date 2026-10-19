@@ -100,6 +100,39 @@ export default function MemoryDetail({ id, onNav }: { id: string; onNav: (page: 
               </div>
             ))}
           </div>
+
+          <div className="faint" style={{ marginTop: 12, marginBottom: 4 }}>
+            Observed exposure — unproven (retrieved in a context this record was written in)
+          </div>
+          <div className="detail-list">
+            {detail.exposedTo.length === 0 && <span className="dim">None recorded.</span>}
+            {detail.exposedTo.map((e) => (
+              <div key={e.id} className="card" style={{ padding: 10, borderLeft: '3px dashed var(--amber, #f5b950)' }}>
+                <span className="mono">{e.id}</span> <StatusBadge value={e.status} />
+                {e.contextId && <span className="faint"> · context {e.contextId}</span>}
+                <div className="dim" style={{ fontSize: 12.5 }}>{shortContent(e.content, 160)}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="faint" style={{ marginTop: 12, marginBottom: 4 }}>
+            Records written while exposed to this memory (potential influence)
+          </div>
+          <div className="detail-list">
+            {detail.exposedRecords.length === 0 && <span className="dim">None recorded.</span>}
+            {detail.exposedRecords.map((r) => (
+              <div key={r.id} className="card" style={{ padding: 10, borderLeft: '3px dashed var(--amber, #f5b950)' }}>
+                <span className="mono">{r.id}</span> <span className="badge neutral">{r.kind}</span>
+                <div className="dim" style={{ fontSize: 12.5 }}>{shortContent(r.label, 160)}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="faint" style={{ marginTop: 12 }}>
+            {detail.createdInContexts.length === 0
+              ? 'Provenance coverage: unknown — this record has no recorded retrieval context or declared lineage. Absence of recorded paths is not proof of absence of influence.'
+              : `Written in context(s): ${detail.createdInContexts.join(', ')}`}
+          </div>
         </div>
       </div>
     </div>

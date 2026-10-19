@@ -12,19 +12,28 @@ import { toJsonProp, parseJsonProp, type IncidentStatus } from '../lib/types.js'
  *   (:Memory)-[:FLAGGED_BY]->(:Incident)      // a memory under review is tied to an incident
  *   (:Decision)-[:FLAGGED_BY]->(:Incident)    // a decision under review is tied to an incident
  *   (:Incident)-[:HAS_EVENT]->(:AuditEvent)   // containment/revalidation audit trail
+ *
+ * Retrieval / exposure (observed, unproven influence — distinct from declared DERIVED_FROM):
+ *   (:Agent)-[:OPENED]->(:Context)            // a context is owned by exactly one agent
+ *   (:Context)-[:RETRIEVED]->(:Memory)        // what an agent actually retrieved into context
+ *   (:Memory)-[:CREATED_IN]->(:Context)       // record written inside a retrieval context
+ *   (:Decision)-[:CREATED_IN]->(:Context)
+ *   (:Memory)-[:EXPOSED_TO]->(:Memory)        // server-derived from RETRIEVED; potential influence
+ *   (:Decision)-[:EXPOSED_TO]->(:Memory)
+ *
  * Nodes carry `synthetic: true` and datasets carry `#SYNTHETIC DEMONSTRATION DATA#`
  * markers; nothing in this graph represents a real security incident.
  */
 const MEMORY_STATUSES = ['trusted', 'suspicious', 'quarantined', 'review_required'];
 const DECISION_STATUSES = ['active', 'review_required', 'revalidated', 'revoked'];
 const INCIDENT_STATUSES = ['open', 'investigating', 'contained', 'resolved'];
-const MEM_REL = [...'DERIVED_FROM SUPPORTED_BY CREATED DEPENDS_ON TARGETS AFFECTS FLAGGED_BY'.split(' ')];
+const MEM_REL = [...'DERIVED_FROM SUPPORTED_BY CREATED DEPENDS_ON TARGETS AFFECTS FLAGGED_BY OPENED RETRIEVED CREATED_IN EXPOSED_TO'.split(' ')];
 
 export async function ensureConstraints(): Promise<void> {
   // Uniqueness/type protections supported by FalkorDB.
   // CREATE INDEX is not idempotent in older FalkorDB releases, so "already
   // indexed" responses are treated as success.
-  for (const label of ['Agent', 'Memory', 'Source', 'Decision', 'Incident']) {
+  for (const label of ['Agent', 'Memory', 'Source', 'Decision', 'Incident', 'Context']) {
     try {
       await query(`CREATE INDEX FOR (n:${label}) ON (n.id)`);
     } catch (err) {

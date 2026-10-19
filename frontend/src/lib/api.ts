@@ -98,6 +98,12 @@ export interface MemoryDetail {
   dependentDecisions: Array<{ id: string; description: string; status: DecisionStatus }>;
   createdAtBy: { id: string; name: string; role: string } | null;
   auditTrail: unknown[];
+  /** Observed exposure: memories retrieved in a context this memory was written in (unproven). */
+  exposedTo: Array<{ id: string; content: string; status: string; contextId: string }>;
+  /** Records written in a context that retrieved this memory (potential influence). */
+  exposedRecords: Array<{ id: string; label: string; kind: 'memory' | 'decision'; contextId: string }>;
+  /** Retrieval contexts this memory was written in (empty when provenance is unknown). */
+  createdInContexts: string[];
 }
 
 export interface GraphNode {
@@ -146,21 +152,58 @@ export interface AgentInfo {
   role: string;
 }
 
+export interface ProvenanceSummary {
+  declaredRelationshipCount: number;
+  exposureRelationshipCount: number;
+  unprovenancedMemories: number;
+  coverageComplete: boolean;
+  caveat: string;
+}
+
 export interface QuarantineReport {
   incidentId: string;
   suspectMemoryId: string | null;
   quarantined: string[];
   flaggedForReview: { memories: string[]; decisions: string[] };
   unresolved: { memories: string[]; decisions: string[] };
+  exposed: { memories: string[]; decisions: string[]; contextIds: string[] };
+  provenance: ProvenanceSummary;
 }
 
 export interface BlastRadius {
   suspectMemoryId: string;
+  /** Confirmed recorded lineage (declared DERIVED_FROM). */
   downstreamMemoryIds: string[];
+  /** Confirmed recorded lineage: decisions depending on a derived memory. */
   affectedDecisionIds: string[];
+  /** Observed exposure (unproven): memories written in a retrieval context that read the suspect. */
+  exposedMemoryIds: string[];
+  /** Observed exposure (unproven): decisions written in / depending on an exposed record. */
+  exposedDecisionIds: string[];
+  exposureContextIds: string[];
   memoryDepth: Record<string, number>;
   chains: Array<{ chain: string[]; decisionId: string | null }>;
   truncated: boolean;
+  provenance: ProvenanceSummary;
+}
+
+/** Mirrors backend RetrievalResult (POST /api/retrievals). */
+export interface RetrievalResult {
+  contextId: string;
+  agentId: string;
+  retrievedMemoryIds: string[];
+  recordedAt: string;
+  correlationId: string | null;
+}
+
+/** Mirrors backend ContextDetail (GET /api/contexts/:id?agentId=…). */
+export interface ContextDetail {
+  contextId: string;
+  agentId: string;
+  createdAt: string;
+  correlationId: string | null;
+  retrievedMemories: Array<{ id: string; content: string; status: MemoryStatus }>;
+  exposedRecords: Array<{ id: string; label: string; kind: 'memory' | 'decision' }>;
 }
 
 /**
@@ -226,7 +269,22 @@ export const api = {
     return request<{ items: MemoryListItem[]; total: number; limit: number; offset: number }>(`/api/memories${suffix}`);
   },
   memory: (id: string) => request<MemoryDetail>(`/api/memories/${encodeURIComponent(id)}`), // typed via MemoryDetail wrapper
-  createMemory: (body: unknown) => request<{ memoryId: string; incidentId: string | null }>('/api/memories', { method: 'POST', body: JSON.stringify(body) }),
+  createMemory: (body: unknown) =>
+    request<{ memoryId: string; incidentId: string | null; derivedFrom: string[]; exposedTo: string[]; contextId: string | null }>(
+      '/api/memories',
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  /** Record that an agent retrieved memories into a context (observed exposure). */
+  recordRetrieval: (body: { contextId: string; agentId: string; memoryIds: string[]; correlationId?: string }) =>
+    request<RetrievalResult>('/api/retrievals', { method: 'POST', body: JSON.stringify(body) }),
+  context: (id: string, agentId: string) =>
+    request<ContextDetail>(`/api/contexts/${encodeURIComponent(id)}?agentId=${encodeURIComponent(agentId)}`),
+  /** Create a decision; when `contextId` is supplied its exposure is recorded server-side. */
+  createDecision: (body: { description: string; agentId: string; dependsOn?: string[]; contextId?: string }) =>
+    request<{ decisionId: string; dependsOn: string[]; exposedTo: string[]; contextId: string | null }>('/api/decisions', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   incidents: () => request<{ incidents: IncidentSummary[] }>('/api/incidents'),
   incident: (id: string) => request<IncidentDetail>(`/api/incidents/${encodeURIComponent(id)}`),
   investigate: (id: string) =>

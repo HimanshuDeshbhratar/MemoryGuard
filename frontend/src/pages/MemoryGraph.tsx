@@ -96,19 +96,24 @@ export default function MemoryGraph({ onNav, dataVersion, incidentId }: { onNav:
 
   const flowEdges = useMemo<Edge[]>(
     () =>
-      (edges ?? []).map((e) => ({
-        id: e.id,
-        source: e.source,
-        target: e.target,
-        label: e.type,
-        type: 'default' as const,
-        animated: false,
-        markerEnd: { type: MarkerType.ArrowClosed as const, color: '#3a4256' },
-        style: { stroke: '#3a4256' },
-        labelShowBg: true,
-        labelBgStyle: { fill: '#11151f' },
-        labelStyle: { fill: '#5d6577', fontSize: 9 },
-      })),
+      (edges ?? []).map((e) => {
+        // EXPOSED_TO is observed exposure (potential influence), not declared
+        // lineage — render it distinctly so lineage and exposure never look alike.
+        const isExposure = e.type === 'EXPOSED_TO';
+        return {
+          id: e.id,
+          source: e.source,
+          target: e.target,
+          label: e.type,
+          type: 'default' as const,
+          animated: false,
+          markerEnd: { type: MarkerType.ArrowClosed as const, color: isExposure ? '#f5b950' : '#3a4256' },
+          style: isExposure ? { stroke: '#f5b950', strokeDasharray: '5 4' } : { stroke: '#3a4256' },
+          labelShowBg: true,
+          labelBgStyle: { fill: '#11151f' },
+          labelStyle: { fill: isExposure ? '#f5b950' : '#5d6577', fontSize: 9 },
+        };
+      }),
     [edges],
   );
 
@@ -135,7 +140,9 @@ export default function MemoryGraph({ onNav, dataVersion, incidentId }: { onNav:
       <h2 className="page-title">Memory Graph</h2>
       <p className="page-sub">
         Live graph from FalkorDB. Edges are real stored relationships (CREATED, DERIVED_FROM, SUPPORTED_BY, DEPENDS_ON,
-        TARGETS, AFFECTS) &mdash; the frontend never invents edges.
+        TARGETS, AFFECTS) &mdash; the frontend never invents edges. Dashed amber edges are <strong>EXPOSED_TO</strong>:
+        observed exposure (a memory was retrieved in a context that produced the record). Exposure is potential influence,
+        not declared derivation.
       </p>
 
       <div className="graph-toolbar">
